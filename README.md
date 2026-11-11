@@ -86,7 +86,7 @@ Both require `package-lock.json`. Runtime variables are available to server-side
 - `execution/`: isolated VM build and runtime services, with restore and reconciliation tools.
 - `infra/`: service and networking templates; `fixtures/`: runnable sample applications.
 
-The hosted platform's credentials, routing configuration, and operational state are not part of this repository. For a separate installation, configure your own domains, VM access, and edge routing. The VM launcher templates expect an x86-64 Linux host with KVM.
+The hosted platform's credentials, routing configuration, and operational state are not part of this repository. For a separate installation, configure your own domains, VM access, and edge routing. The VM launcher templates expect an x86-64 Linux host with KVM. The execution host can set `npm_registry` in its `config.json` to a credential-free HTTPS npm mirror; leaving it unset preserves npm's default registry.
 
 ## Develop
 
