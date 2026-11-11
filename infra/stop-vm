@@ -1,0 +1,17 @@
+#!/usr/bin/python3
+import os
+from pathlib import Path
+import socket
+import time
+
+monitor = Path(os.environ.get("PAAS_MONITOR_DIR", "/run/ovh-paas")) / "monitor.sock"
+if monitor.exists():
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.connect(str(monitor))
+        connection.sendall(b"system_powerdown\n")
+    for _ in range(90):
+        if not monitor.exists():
+            break
+        time.sleep(1)
+    else:
+        raise SystemExit("Guest did not shut down cleanly; do not copy its live disk")

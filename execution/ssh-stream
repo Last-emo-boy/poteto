@@ -1,0 +1,10 @@
+#!/bin/sh
+set -eu
+port=$1
+alias=$2
+command=$3
+case "$port" in 22099|2210[0-3]) ;; *) exit 2;; esac
+exec ssh -i /srv/ovh-paas-execution/admin.key -p "$port" \
+ -o BatchMode=yes -o ConnectTimeout=5 -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
+ -o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=/srv/ovh-paas-execution/known_hosts \
+ -o "HostKeyAlias=$alias" ubuntu@127.0.0.1 "$command"

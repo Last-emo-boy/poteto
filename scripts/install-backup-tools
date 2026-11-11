@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+mkdir -p "$ROOT/secrets/bin/linux"
+cd "$ROOT/infra/age-tools"
+go build -mod=mod -trimpath -o "$ROOT/secrets/bin/age" filippo.io/age/cmd/age
+go build -mod=readonly -trimpath -o "$ROOT/secrets/bin/age-keygen" filippo.io/age/cmd/age-keygen
+GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -mod=readonly -trimpath -o "$ROOT/secrets/bin/linux/age" filippo.io/age/cmd/age
+"$ROOT/secrets/bin/age" --version

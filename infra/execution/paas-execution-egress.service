@@ -1,0 +1,12 @@
+[Unit]
+Description=Isolate user VMs and allow only private PaaS supervisor endpoints
+Requires=ovh-paas-egress.service
+After=ovh-paas-egress.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/paas-execution/execution/egress.py
+RemainAfterExit=true
+
+[Install]
+WantedBy=multi-user.target

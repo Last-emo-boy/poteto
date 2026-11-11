@@ -1,0 +1,11 @@
+http:
+  routers:
+    publisher-api:
+      rule: Host(`deploy.example.com`)
+      entryPoints: [web]
+      service: publisher-api
+  services:
+    publisher-api:
+      loadBalancer:
+        servers:
+          - url: http://172.18.0.1:18000

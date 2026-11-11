@@ -1,0 +1,20 @@
+[Unit]
+Description=Independent PaaS durable deployment worker
+After=docker.service paas-publisher-api.service
+Requires=docker.service
+
+[Service]
+WorkingDirectory=/opt/paas-publisher
+Environment=PAAS_DATA=/var/lib/paas-publisher
+Environment=PAAS_BACKEND_CONFIG=/etc/paas-publisher/backend.json
+UMask=0007
+ExecStart=/opt/paas-publisher/.venv/bin/python -m publisher.worker
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=180
+KillMode=mixed
+MemoryMax=768M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

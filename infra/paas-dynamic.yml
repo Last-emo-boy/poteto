@@ -1,0 +1,10 @@
+http:
+  middlewares:
+    paas-wake:
+      plugin:
+        sablier:
+          sablierUrl: http://paas-sablier:10000
+          group: paas-dynamic
+          sessionDuration: 2m
+          blocking:
+            timeout: 60s

@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>数据应用 · OVH PaaS</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#f5f3ee;color:#202b27;font:16px/1.6 system-ui,sans-serif}main{max-width:860px;margin:8vh auto;padding:0 24px}small{color:#53695c;font-weight:650;letter-spacing:.12em}h1{font-size:clamp(32px,6vw,50px);line-height:1.15;letter-spacing:-.045em;margin:16px 0}p{color:#53605a}.status{display:flex;gap:8px;flex-wrap:wrap;margin:32px 0}.status span{padding:6px 12px;border-radius:20px;background:#e3eadf;font-size:14px}section{padding:24px 0;border-top:1px solid #cbd2c8}h2{font-size:20px;margin:0 0 16px}form{display:flex;gap:8px}input{min-width:0;flex:1;padding:12px;border:1px solid #aeb9ae;border-radius:8px;background:#fff;font:inherit}button{padding:12px 18px;border:0;border-radius:8px;background:#24533c;color:white;font:inherit;cursor:pointer}button:disabled{opacity:.5}ul{padding-left:24px}#feedback{min-height:1.6em;color:#24533c}code{font-size:14px;overflow-wrap:anywhere}footer{margin:24px 0;font-size:14px;color:#53605a}
+</style>
+<main>
+<small>OVH PAAS / LIVE APPLICATION</small>
+<h1>应用会休眠，<br>数据一直在。</h1>
+<p>一个由发布 API 部署的动态应用：PostgreSQL 保存记录，持久化卷保存文件。</p>
+<div class="status"><span id="version">正在连接应用</span><span>数据库不随应用休眠</span><span>独立数据卷</span></div>
+<section><h2>写入数据库</h2><form id="record"><input name="value" aria-label="记录内容" placeholder="输入一条想保存的记录" maxlength="2000" required><button>保存记录</button></form><ul id="records"></ul></section>
+<section><h2>保存文件</h2><form id="upload"><input name="text" aria-label="文件内容" placeholder="写点内容，保存到 note.txt" required><button>保存文件</button></form><p id="files"></p></section>
+<p id="feedback" role="status" aria-live="polite"></p><footer>进程：<code id="boot"></code> · 数据库角色：<span id="role"></span></footer>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+async function refresh(){const response=await fetch('/api/state');if(!response.ok)throw Error('数据暂未就绪，请稍后重试');const state=await response.json();$('version').textContent=state.version;$('boot').textContent=state.boot_id;$('role').textContent=state.database_superuser?'管理员':'非管理员';$('records').replaceChildren(...state.records.map(row=>{const li=document.createElement('li');li.textContent=row.value;return li}));$('files').textContent=Object.entries(state.files).map(([name,text])=>name+'：'+text).join(' · ')||'还没有文件';}
+function bind(id,path,body){$(id).addEventListener('submit',async event=>{event.preventDefault();const button=event.target.querySelector('button');button.disabled=true;$('feedback').textContent='正在保存…';try{const response=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body(new FormData(event.target)))});if(!response.ok)throw Error('保存失败，请重试');event.target.reset();await refresh();$('feedback').textContent='已保存'}catch(error){$('feedback').textContent=error.message}finally{button.disabled=false}})}
+bind('record','/api/records',data=>({value:data.get('value')}));bind('upload','/api/uploads',data=>({name:'note.txt',text:data.get('text')}));refresh().catch(error=>$('feedback').textContent=error.message);
+</script>
+</html>

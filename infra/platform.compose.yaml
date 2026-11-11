@@ -1,0 +1,38 @@
+name: paas-platform
+services:
+  wake-proxy:
+    build: ./wake-proxy
+    image: paas-wake-proxy:1
+    container_name: paas-wake-proxy
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 1
+    volumes: [/etc/dokploy/paas/wake:/etc/caddy:ro]
+    networks:
+      edge:
+        aliases: [paas-wake-proxy]
+  sablier:
+    image: sablierapp/sablier:1.20.0
+    command: [start, --provider.name=docker]
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    volumes: [/var/run/docker.sock:/var/run/docker.sock]
+    networks:
+      edge:
+        aliases: [paas-sablier]
+  registry:
+    image: registry:3
+    restart: unless-stopped
+    mem_limit: 256m
+    cpus: 0.5
+    ports: [127.0.0.1:5000:5000]
+    volumes: [registry-data:/var/lib/registry]
+    networks: [edge]
+volumes:
+  registry-data:
+    name: paas-registry-data
+networks:
+  edge:
+    external: true
+    name: dokploy-network

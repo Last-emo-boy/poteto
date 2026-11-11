@@ -1,0 +1,1 @@
+{"runtime":"dockerfile","port":3000,"health_check":"/healthz","sleep":true,"memory_mb":128,"cpus":0.25,"migration_command":"python3 migrate.py"}

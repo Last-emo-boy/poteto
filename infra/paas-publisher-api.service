@@ -1,0 +1,28 @@
+[Unit]
+Description=Independent PaaS publishing API
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+User=publisher
+Group=publisher
+WorkingDirectory=/opt/paas-publisher
+Environment=PAAS_DATA=/var/lib/paas-publisher
+Environment=PAAS_EDGE_TOKEN_FILE=/var/lib/paas-publisher/edge.token
+UMask=0007
+ExecStart=/opt/paas-publisher/.venv/bin/uvicorn publisher.api:create_app --factory --host 172.18.0.1 --port 18000 --no-server-header --limit-concurrency 32 --timeout-keep-alive 5
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=150
+MemoryMax=512M
+CPUQuota=100%
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/paas-publisher
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,28 @@
+[Unit]
+Description=Disposable isolated PaaS build VM
+Requires=paas-execution-egress.service
+After=network-online.target paas-execution-egress.service
+
+[Service]
+User=paasbuild
+Group=paasbuild
+SupplementaryGroups=kvm
+Slice=paas-execution.slice
+Environment=PAAS_MONITOR_DIR=/srv/ovh-paas-execution/vm/builder
+ExecStart=/usr/bin/python3 /opt/paas-execution/execution/vm.py builder
+ExecStop=/opt/paas-execution/stop-vm
+TimeoutStopSec=100
+KillMode=control-group
+MemoryMax=5G
+CPUQuota=200%
+TasksMax=256
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+ReadWritePaths=/srv/ovh-paas-execution/vm/builder
+BindReadOnlyPaths=/srv/ovh-paas-execution/resolv.conf:/etc/resolv.conf

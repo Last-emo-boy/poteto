@@ -1,0 +1,11 @@
+[Unit]
+Description=Independent PaaS VM UID-scoped outbound isolation
+Before=ovh-paas-vm.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /srv/ovh-paas/egress.nft
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Resource envelope for independent PaaS user execution
+
+[Slice]
+CPUQuota=400%
+CPUWeight=10
+MemoryMax=30G
+IOWeight=10
+IOReadBandwidthMax=/dev/md3 100M
+IOWriteBandwidthMax=/dev/md3 50M

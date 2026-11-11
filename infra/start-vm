@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+VM_DIR=${PAAS_VM_DIR:-/srv/ovh-paas/vm}
+MONITOR_DIR=${PAAS_MONITOR_DIR:-/run/ovh-paas}
+NET="user,id=net0,net=10.201.0.0/24,host=10.201.0.2,dns=10.201.0.3,hostfwd=tcp:127.0.0.1:${PAAS_SSH_PORT:-21022}-:22,hostfwd=tcp:127.0.0.1:${PAAS_HTTP_PORT:-21080}-:80,hostfwd=tcp:127.0.0.1:${PAAS_HTTPS_PORT:-21443}-:443,hostfwd=tcp:127.0.0.1:${PAAS_PANEL_PORT:-21300}-:3000"
+if [ -n "${PAAS_EDGE_BIND:-}" ]; then
+  NET="$NET,hostfwd=tcp:$PAAS_EDGE_BIND:${PAAS_HTTP_PORT:-21080}-:80"
+fi
+exec /usr/bin/qemu-system-x86_64 \
+  -name ovh-paas -machine q35,accel=kvm -cpu host -smp "${PAAS_VCPU:-8}" -m "${PAAS_RAM_MIB:-32768}" \
+  -display none -nodefaults \
+  -serial "file:$VM_DIR/serial.log" \
+  -monitor "unix:$MONITOR_DIR/monitor.sock,server=on,wait=off" \
+  -drive "file=$VM_DIR/root.qcow2,if=virtio,format=qcow2,discard=unmap" \
+  -drive "file=$VM_DIR/seed.iso,if=virtio,format=raw,readonly=on" \
+  -netdev "$NET" \
+  -device virtio-net-pci,netdev=net0

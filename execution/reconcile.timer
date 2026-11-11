@@ -1,0 +1,7 @@
+[Unit]
+Description=Refresh publisher tenant ingress
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+[Install]
+WantedBy=timers.target

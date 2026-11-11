@@ -1,0 +1,68 @@
+#!/usr/bin/env python3
+"""Build the public installer site and its agent skill."""
+import argparse
+import html
+import shutil
+import sys
+import tempfile
+import tomllib
+from pathlib import Path
+from urllib.parse import urlsplit
+import zipapp
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+from publisher.cli_tools import VERSION
+
+MODULES = ("__init__.py", "cli.py", "cli_login.py", "cli_tools.py", "login_contract.py", "transfer_wire.py")
+SKILL = Path("skills/poteto-deploy/SKILL.md")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("output", type=Path)
+    parser.add_argument("--url", required=True, help="Public HTTPS origin serving the installer and archive")
+    args = parser.parse_args()
+    origin = args.url.rstrip("/")
+    url = urlsplit(origin)
+    if (url.scheme != "https" or not url.hostname or url.username is not None or url.path or url.query or url.fragment
+            or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:/" for c in origin)):
+        parser.error("--url must be an HTTPS origin")
+    if tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"] != VERSION:
+        raise SystemExit("CLI and package versions must match")
+    args.output.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory() as stage:
+        root = Path(stage)
+        package = root / "publisher"
+        package.mkdir()
+        for filename in MODULES:
+            shutil.copyfile(ROOT / "publisher" / filename, package / filename)
+        (root / "__main__.py").write_text("from publisher.cli import main\nmain()\n")
+        zipapp.create_archive(root, args.output / f"poteto-{VERSION}.pyz",
+                              interpreter="/usr/bin/env python3", compressed=True)
+    template = (ROOT / "scripts/install-poteto.sh").read_text()
+    installer = template.replace("@POTETO_BASE_URL@", origin).replace("@POTETO_VERSION@", VERSION)
+    (args.output / "install.sh").write_text(installer)
+    skill = args.output / SKILL
+    skill.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ROOT / SKILL, skill)
+    command = html.escape(f"curl -fsSL {origin}/install.sh | sh")
+    (args.output / "index.html").write_text(f"""<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>安装 Poteto CLI</title>
+<style>
+body{{margin:0;background:#f4f6ef;color:#132e24;font:16px/1.6 system-ui,sans-serif}}
+main{{max-width:800px;margin:auto;padding:clamp(22px,7vw,76px)}}header{{display:flex;justify-content:space-between;gap:12px}}
+h1{{font-size:clamp(42px,9vw,100px);line-height:1.05;letter-spacing:-.06em;margin:60px 0 12px}}
+p{{color:#466052}}pre{{padding:18px;background:#132e24;color:#e2f4c1;border-radius:10px;white-space:pre-wrap;overflow-wrap:anywhere}}a{{color:#225c41}}
+</style>
+<main><header><strong>Poteto</strong><span>CLI / {VERSION}</span></header>
+<h1>从终端发布。</h1><p>macOS 或 Linux，需 Python 3.10+。无需 sudo。</p>
+<pre><code>{command}</code></pre><p>先运行 <code>poteto plan .</code> 检查发布目录，再登录并运行 <code>poteto deploy . --preview</code>。</p>
+<a href="/install.sh">查看安装脚本</a> · <a href="/poteto-{VERSION}.pyz">下载 CLI</a> · <a href="/{SKILL.as_posix()}">Agent Skill</a>
+</main></html>""")
+    print(args.output.resolve())
+
+
+if __name__ == "__main__":
+    main()

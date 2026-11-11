@@ -1,0 +1,18 @@
+[Unit]
+Description=Private same-host PaaS execution supervisor
+After=network-online.target paas-execution-egress.service
+Requires=paas-execution-egress.service
+
+[Service]
+WorkingDirectory=/opt/paas-execution
+ExecStart=/usr/bin/python3 -m execution.host serve
+Restart=on-failure
+RestartSec=5
+UMask=0077
+MemoryMax=256M
+CPUQuota=50%
+NoNewPrivileges=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

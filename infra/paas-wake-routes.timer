@@ -1,0 +1,10 @@
+[Unit]
+Description=Discover PaaS deployment route changes
+
+[Timer]
+OnBootSec=30
+OnUnitActiveSec=15
+Unit=paas-wake-routes.service
+
+[Install]
+WantedBy=timers.target

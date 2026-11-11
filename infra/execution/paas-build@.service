@@ -1,0 +1,15 @@
+[Unit]
+Description=Supervised PaaS build job %i
+After=network-online.target
+
+[Service]
+Type=exec
+Slice=paas-execution.slice
+WorkingDirectory=/opt/paas-execution
+ExecStart=/usr/bin/python3 -m execution.host run-build %i
+ExecStopPost=/usr/bin/python3 -m execution.host finish-build %i
+RuntimeMaxSec=1200
+TimeoutStopSec=120
+MemoryMax=256M
+CPUQuota=100%
+UMask=0077

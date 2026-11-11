@@ -1,0 +1,7 @@
+[Unit]
+Description=Reconcile publisher tenant ingress
+After=docker.service
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /opt/paas-runtime/reconcile.py
+TimeoutStartSec=45

@@ -1,0 +1,13 @@
+secrets/
+backups/
+evidence/
+state.json
+*.qcow2
+*.img
+*.iso
+__pycache__/
+.workflow/
+
+.venv/
+*.egg-info/
+.pytest_cache/

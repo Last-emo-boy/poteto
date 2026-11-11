@@ -1,0 +1,33 @@
+[Unit]
+Description=Independent PaaS tenant execution VM %i
+Requires=paas-execution-egress.service
+After=network-online.target paas-execution-egress.service
+
+[Service]
+User=paasrt%i
+Group=paasrt%i
+SupplementaryGroups=kvm
+Slice=paas-execution.slice
+Environment=PAAS_MONITOR_DIR=/srv/ovh-paas-execution/vm/runtime%i
+ExecStart=/usr/bin/python3 /opt/paas-execution/execution/vm.py runtime%i
+ExecStop=/opt/paas-execution/stop-vm
+TimeoutStopSec=100
+KillMode=control-group
+Restart=on-failure
+RestartSec=5
+MemoryMax=7G
+CPUQuota=200%
+TasksMax=256
+UMask=0077
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+ReadWritePaths=/srv/ovh-paas-execution/vm/runtime%i
+BindReadOnlyPaths=/srv/ovh-paas-execution/resolv.conf:/etc/resolv.conf
+
+[Install]
+WantedBy=multi-user.target

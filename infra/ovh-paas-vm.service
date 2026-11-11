@@ -1,0 +1,48 @@
+[Unit]
+Description=Independent Dokploy PaaS virtual machine
+After=network-online.target docker.service ovh-paas-egress.service
+Requires=ovh-paas-egress.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=paasvm
+Group=paasvm
+SupplementaryGroups=kvm
+RuntimeDirectory=ovh-paas
+RuntimeDirectoryMode=0700
+UMask=0077
+ExecStart=/srv/ovh-paas/bin/start-vm
+ExecStop=/srv/ovh-paas/bin/stop-vm
+EnvironmentFile=-/srv/ovh-paas/config.env
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+KillMode=control-group
+MemoryMax=34G
+CPUQuota=800%
+CPUWeight=20
+IOWeight=20
+IOReadBandwidthMax=/dev/md3 100M
+IOWriteBandwidthMax=/dev/md3 50M
+TasksMax=256
+LimitCORE=0
+NoNewPrivileges=true
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+DevicePolicy=closed
+DeviceAllow=/dev/kvm rw
+ReadWritePaths=/srv/ovh-paas/vm /run/ovh-paas
+BindReadOnlyPaths=/srv/ovh-paas/resolv.conf:/etc/resolv.conf
+
+[Install]
+WantedBy=multi-user.target
