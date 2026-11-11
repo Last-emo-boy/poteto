@@ -434,7 +434,10 @@ def run_build(build_id):
                 (job / 'build.log').write_bytes(log)
             except (subprocess.SubprocessError, OSError):
                 (job / 'build.log').write_text('Guest build output was unavailable after ' + type(error).__name__)
-            write_json(job / "status.json", {"id": build_id, "state": "failed", "error": str(error) if isinstance(error, ExecutionError) else "Host build driver failed"})
+            message = (f"Build step exceeded its {error.timeout}-second time limit; inspect deployment logs"
+                       if isinstance(error, subprocess.TimeoutExpired) else
+                       str(error) if isinstance(error, ExecutionError) else "Host build driver failed")
+            write_json(job / "status.json", {"id": build_id, "state": "failed", "error": message})
             raise
         finally:
             systemctl("stop", "paas-builder.service")

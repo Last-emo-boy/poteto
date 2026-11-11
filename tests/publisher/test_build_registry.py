@@ -43,6 +43,7 @@ class BuildRegistryTests(unittest.TestCase):
                 with self.assertRaises(subprocess.TimeoutExpired): host.run_build('a' * 24)
             self.assertEqual(b'last build output', (job / 'build.log').read_bytes())
             self.assertEqual('failed', json.loads((job / 'status.json').read_text())['state'])
+            self.assertIn('180-second', json.loads((job / 'status.json').read_text())['error'])
             self.assertEqual('sudo -n tail -c 2097152 /work/build.log', ssh.call_args.args[2])
             self.assertEqual(('stop', 'paas-builder.service'), control.call_args.args)
             self.assertFalse((root / 'active-build').exists())
