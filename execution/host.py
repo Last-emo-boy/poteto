@@ -376,6 +376,10 @@ def run_build(build_id):
     checked_id(build_id)
     job = ROOT / "builds" / build_id
     spec = json.loads((job / "spec.json").read_text())
+    config_path = ROOT / 'config.json'
+    config = json.loads(config_path.read_text()) if config_path.exists() else {}
+    if 'npm_registry' in config:
+        spec['npm_registry'] = config['npm_registry']
     with lock("builder"):
         write_json(job / "status.json", {"id": build_id, "state": "running"})
         (ROOT / 'active-build').write_text(build_id)
@@ -424,6 +428,12 @@ def run_build(build_id):
             (job / "image.tar.next").replace(job / "image.tar")
             write_json(job / "status.json", {"id": build_id, "state": "succeeded", "image": "paas-release:" + build_id, "image_bytes": size, "image_disk_bytes":image_disk_bytes, "boot_id": boot_id})
         except Exception as error:
+            # Keep bounded guest output when a command times out, not just on success.
+            try:
+                log = ssh(22099, alias, 'sudo -n tail -c 2097152 /work/build.log', timeout=15).stdout
+                (job / 'build.log').write_bytes(log)
+            except (subprocess.SubprocessError, OSError):
+                (job / 'build.log').write_text('Guest build output was unavailable after ' + type(error).__name__)
             write_json(job / "status.json", {"id": build_id, "state": "failed", "error": str(error) if isinstance(error, ExecutionError) else "Host build driver failed"})
             raise
         finally:

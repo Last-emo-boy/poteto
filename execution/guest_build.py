@@ -3,16 +3,28 @@ import json
 from pathlib import Path
 import re
 import subprocess
+from urllib.parse import urlsplit
 from publisher.archive import unpack
 
 WORK = Path("/work")
+
+
+def npm_command(spec, *arguments):
+    command = ['npm', *arguments]
+    registry = spec.get('npm_registry')
+    if registry is not None:
+        parsed = urlsplit(registry)
+        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError('Build npm registry must be an HTTPS URL without credentials')
+        command += ['--registry', registry]
+    return command
 
 
 def dockerfile(spec):
     runtime = spec["runtime"]
     if runtime == "static" and not spec.get("build_command"):
         return "FROM nginx:1.28-alpine\nCOPY . /usr/share/nginx/html/\n"
-    lines = ["FROM node:24-alpine AS build", "WORKDIR /app", "COPY . .", "RUN npm ci"]
+    lines = ["FROM node:24-alpine AS build", "WORKDIR /app", "COPY . .", "RUN " + json.dumps(npm_command(spec, 'ci'))]
     if spec.get("build_command"):
         lines.append("RUN " + json.dumps(["sh", "-c", spec["build_command"]]))
     if runtime == "static":
@@ -22,7 +34,7 @@ def dockerfile(spec):
             raise ValueError("Static output directory must be inside the project")
         lines += ["FROM nginx:1.28-alpine", "COPY --from=build " + json.dumps(["/app/" + output, "/usr/share/nginx/html/"])]
     else:
-        lines += ["RUN npm prune --omit=dev", "FROM node:24-alpine", "WORKDIR /app", "ENV NODE_ENV=production",
+        lines += ["RUN " + json.dumps(npm_command(spec, 'prune', '--omit=dev')), "FROM node:24-alpine", "WORKDIR /app", "ENV NODE_ENV=production",
                   "COPY --from=build --chown=10001:10001 /app /app", "USER 10001:10001",
                   "CMD " + json.dumps(["sh", "-c", spec.get("start_command") or "npm start"])]
     return "\n".join(lines) + "\n"
@@ -32,10 +44,11 @@ def logged(command):
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     written = 0
     with (WORK / "build.log").open("wb") as log:
-        while chunk := process.stdout.read(8192):
+        while chunk := process.stdout.read1(8192):
             if written < 2 * 1024**2:
                 part = chunk[:2 * 1024**2 - written]
                 log.write(part)
+                log.flush()
                 written += len(part)
     return process.wait()==0
 

@@ -50,7 +50,7 @@ class ExecutionTests(unittest.TestCase):
         value = 'echo hello\nFROM evil\nRUN echo injected'
         content = dockerfile({'runtime': 'node', 'build_command': value, 'start_command': value})
         self.assertEqual(2, sum(line.startswith('FROM ') for line in content.splitlines()))
-        run = next(line[4:] for line in content.splitlines() if line.startswith('RUN ['))
+        run = next(line[4:] for line in content.splitlines() if line.startswith('RUN ["sh",'))
         self.assertEqual(['sh', '-c', value], json.loads(run))
         command = next(line[4:] for line in content.splitlines() if line.startswith('CMD '))
         self.assertEqual(['sh', '-c', value], json.loads(command))
