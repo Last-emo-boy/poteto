@@ -272,7 +272,8 @@ class CLITests(unittest.TestCase):
                            check=True, capture_output=True)
             archive = dist / f"poteto-{VERSION}.pyz"
             skill = Path("skills/poteto-deploy/SKILL.md")
-            self.assertEqual((repo / skill).read_bytes(), (dist / skill).read_bytes())
+            self.assertEqual((repo / skill).read_text().replace(
+                "https://poteto.iflink.tech", "https://download.test"), (dist / skill).read_text())
             self.assertIn("/" + skill.as_posix(), (dist / "index.html").read_text())
             with zipfile.ZipFile(archive) as packed:
                 self.assertNotIn("publisher/api.py", packed.namelist())
@@ -297,6 +298,18 @@ class CLITests(unittest.TestCase):
                                     env=env | {"POTETO_TEST_CURL_FAILURE": "1"}, capture_output=True)
             self.assertNotEqual(0, failed.returncode)
             self.assertEqual(archive.read_bytes(), installed.read_bytes())
+
+    def test_distribution_can_embed_api_origin_without_changing_source_defaults(self):
+        repo = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp)
+            subprocess.run([repo/"scripts/build-poteto-dist", root/"dist", "--url", "https://install.test",
+                            "--api-url", "https://api.test"], check=True, capture_output=True)
+            archive=root/"dist"/f"poteto-{VERSION}.pyz"
+            code="import sys; sys.path.insert(0,sys.argv[1]); from publisher.login_contract import DEFAULT_URL; print(DEFAULT_URL)"
+            result=subprocess.check_output(["python3","-c",code,str(archive)],cwd=root,text=True)
+            self.assertEqual("https://api.test",result.strip())
+            self.assertIn('DEFAULT_URL = "https://deploy.w33d.xyz"', (repo/"publisher/login_contract.py").read_text())
 
 
 if __name__ == "__main__":

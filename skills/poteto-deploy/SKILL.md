@@ -9,16 +9,23 @@ description: 用 Poteto CLI 把现有应用目录预检并发布到 Poteto 的 H
 
 ## 安装与凭据
 
-如果没有可用的 Poteto 0.3.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要 sudo。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
+如果没有可用的 Poteto 0.4.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
 
 ```sh
-curl -fsSL https://app-5ac4322ae76637bc9f813f2a.poteto.best/install.sh | sh
+curl -fsSL https://poteto.iflink.tech/install.sh | sh
 ```
 
-默认可执行文件是 `$HOME/.local/bin/poteto`。运行 `poteto --version` 确认可用。
+Windows 使用 PowerShell 7+：
+
+```powershell
+irm https://poteto.iflink.tech/install.ps1 | iex
+```
+
+默认可执行文件：macOS/Linux 为 `$HOME/.local/bin/poteto`；Windows 为 `$env:LOCALAPPDATA\Programs\Poteto\bin\poteto.cmd`，安装器会添加用户 PATH。运行 `poteto --version` 确认可用。
 
 - 用户可用 `poteto login` 在浏览器完成 IF.Link 登录。使用指定的凭据文件时，通过 `POTETO_TOKEN_FILE` 传入路径。不要索要或输出 token 内容，不要将凭据复制到上传目录。
 - 用 `poteto doctor` 核对项目和权限。仅接受有目标项目预览权限的凭据；不要为自动化改用管理员凭据或自行扩大权限。使用项目级手动 token 时，部署命令加 `--project "$PROJECT_ID"`。IF.Link 登录凭据已绑定项目时可省略。
+- 重复使用同一目录时，可运行 `poteto link "$APP_DIR" --project "$PROJECT_ID"` 保存项目与 API 地址；`.poteto/` 不保存 token，也不会上传。`poteto unlink "$APP_DIR"` 只解除本地绑定，不删除服务器项目。
 
 ## 预检 → 预览 → 验证
 
@@ -34,3 +41,5 @@ poteto deploy "$APP_DIR" --project "$PROJECT_ID" --preview --url-only
 - 预检失败时按 JSON 的 `error.code` 和 `error.message` 处理；不要绕过预检或改用生产发布。上传后失败时用 `poteto deployments --project "$PROJECT_ID"` 和 `poteto logs <发布 ID>` 定位，不盲目重复创建发布。
 
 只在 `deploy` 成功且返回的 HTTPS 地址可访问后，才交付预览链接。验证首页或应用实际配置的健康检查路径；验证共享数据时优先使用只读请求。不要把 token 或环境变量值放进回复。
+
+后续用 `poteto inspect <预览 URL>` 查看同一个部署，用 `poteto logs <预览 URL>` 查看日志，用 `poteto ls` 列出当前项目发布。此技能始终使用 `--preview`；不得为了绕过预览权限改用 `--prod`。

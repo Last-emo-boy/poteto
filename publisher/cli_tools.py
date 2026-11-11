@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import tarfile
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 _PAGE = """<!doctype html>
 <html lang="en">
@@ -80,14 +80,14 @@ def _manifest(directory: Path, explicit: Path | None):
 def deployment_config(directory: Path, explicit: Path | None):
     manifest = _manifest(directory, explicit)
     if manifest is not None and manifest.is_file():
-        return json.loads(manifest.read_text())
+        return json.loads(manifest.read_text(encoding="utf-8-sig"))
     return {"runtime": "static"}
 
 
 def upload_files(root: Path, credential_file: Path | None = None):
     token_file = credential_file or os.environ.get("POTETO_TOKEN_FILE") or os.environ.get("PAAS_TOKEN_FILE")
     credential = Path(token_file).expanduser().resolve() if token_file else None
-    excluded = {".git", ".venv", "node_modules", "__pycache__", ".DS_Store", ".ssh", ".aws", "secrets", ".codex"}
+    excluded = {".git", ".poteto", ".venv", "node_modules", "__pycache__", ".DS_Store", ".ssh", ".aws", "secrets", ".codex"}
     tracked = None
     if (root / ".git").exists():
         result = subprocess.run(["git", "-C", str(root), "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
@@ -129,7 +129,7 @@ class PlanError(RuntimeError):
 
 def _read_object(path: Path):
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except ValueError:
         raise PlanError("invalid_json", f"{path.name} must contain a valid JSON object.") from None
     if not isinstance(value, dict):
@@ -204,7 +204,9 @@ class DeploymentPlan:
 
 
 def plan_deployment(directory: Path, explicit: Path | None, credential_file: Path | None = None,
-                    *, preview: bool = False):
+                    *, preview: bool = False, production: bool = False):
+    if preview and production:
+        raise PlanError("invalid_target", "Choose either --preview or --prod")
     root = directory.resolve()
     if not root.is_dir():
         raise PlanError("missing_directory", "Deployment directory does not exist.")
@@ -219,6 +221,8 @@ def plan_deployment(directory: Path, explicit: Path | None, credential_file: Pat
         config, origin = _detect(root, names)
     if preview:
         config["target"] = "preview"
+    elif production:
+        config["target"] = "production"
     runtime = config.get("runtime", "static")
     if runtime not in ("static", "node", "dockerfile"):
         raise PlanError("invalid_runtime", "runtime must be static, node or dockerfile.")

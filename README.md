@@ -11,7 +11,42 @@ poteto deploy . --preview --url-only
 
 ## CLI and Agent Skill
 
-The [hosted installer](https://app-5ac4322ae76637bc9f813f2a.poteto.best/) is available for macOS and Linux with Python 3.10 or newer. Run `poteto login` to use an approved IF.Link account, or point `POTETO_TOKEN_FILE` at a project-scoped token file and pass `--project`. Keep credentials out of prompts and upload directories.
+The [hosted installer](https://poteto.iflink.tech/) supports Windows, macOS and Linux with Python 3.10 or newer. No administrator access is needed.
+
+macOS / Linux:
+
+```sh
+curl -fsSL https://poteto.iflink.tech/install.sh | sh
+```
+
+Windows, in PowerShell 7 or newer (`pwsh`):
+
+```powershell
+irm https://poteto.iflink.tech/install.ps1 | iex
+```
+
+Windows installs `poteto.cmd` in `%LOCALAPPDATA%\Programs\Poteto\bin` and adds it to your user PATH. Set `POTETO_INSTALL_DIR` for a custom location. To install without changing PATH, download and run `install.ps1 -NoPath`.
+
+Run `poteto login` to use an approved IF.Link account, or point `POTETO_TOKEN_FILE` at a project-scoped token file. Keep credentials out of prompts and upload directories. Windows login credentials use `%LOCALAPPDATA%\Poteto\token.json`; existing `~/.config/poteto/token.json` credentials remain usable.
+
+## Link a directory once
+
+```sh
+poteto login
+poteto link --project PROJECT_ID
+poteto plan . --preview --json
+poteto deploy . --preview --url-only
+poteto ls
+poteto inspect https://preview-DEPLOYMENT_ID.page.iflink.tech
+```
+
+With an IF.Link login, `poteto link` can use the login's project without `--project`. A link stores only the project ID and API origin in `.poteto/project.json`. It is excluded from uploads and ignored by Git. Child directories inherit the link, except across a nested Git repository. `poteto unlink` removes only the local link, not the remote application.
+
+`deploy`, `ls`, `env`, `database`, `volume`, `promote`, `rollback`, and `project status` can use the linked project. Explicit `--project` takes precedence. API selection is `--url`, then `POTETO_URL` / legacy `PAAS_URL`, then the directory link, then the distribution default. A link from another API is never used as the selected project's default, and a login file cannot authenticate a different API.
+
+Use `poteto deploy . --prod` only when you intend a production deployment and have production permission. It is mutually exclusive with `--preview`. Existing manifest defaults are preserved; linking a directory makes otherwise unspecified deployments previews. `inspect`, `status`, and `logs` accept a deployment ID or an actual Poteto preview URL. `inspect` also resolves a production application URL to its current deployment.
+
+`POTETO_TOKEN` can supply a token through the environment; the existing `PAAS_TOKEN`, `PAAS_TOKEN_FILE`, and `PAAS_URL` variables remain supported. Never put a token in a command argument.
 
 Agents can follow the [Poteto preview skill](skills/poteto-deploy/SKILL.md) for installation, preflight, publishing, and verification.
 

@@ -130,7 +130,8 @@ class CliLoginTests(unittest.TestCase):
             workers[0].join(timeout=3)
             token = json.loads(credential.read_text())["token"]
             self.assertNotIn("token", result)
-            self.assertEqual(0o600, credential.stat().st_mode & 0o777)
+            if os.name == "posix":
+                self.assertEqual(0o600, credential.stat().st_mode & 0o777)
             self.assertEqual([400, 200], [r[0] for r in callbacks])
             self.assertNotIn(token.encode(), callbacks[-1][1])
             self.assertEqual(self.project, result["project_id"])

@@ -13,11 +13,13 @@ import urllib.request
 if __package__:
     from .cli_login import default_token_file, login, logout
     from .cli_tools import VERSION, PlanError, deployment_config, initialize, pack, plan_deployment
+    from .cli_project import deployment_reference, find_link, unlink, write_link
     from .login_contract import DEFAULT_URL, LOGIN_PATH
     from .transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
 else:
     from cli_login import default_token_file, login, logout
     from cli_tools import VERSION, PlanError, deployment_config, initialize, pack, plan_deployment
+    from cli_project import deployment_reference, find_link, unlink, write_link
     from login_contract import DEFAULT_URL, LOGIN_PATH
     from transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
 
@@ -27,7 +29,7 @@ class Client:
         self.url, self.token = url.rstrip("/"), token
 
     def request(self, method, path, body=None, raw=False):
-        headers = {"User-Agent": "OVH-PaaS-CLI/0.1"}
+        headers = {"User-Agent": "Poteto/" + VERSION}
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
         if raw:
@@ -162,14 +164,20 @@ def _credential_file(url):
     token_file = os.environ.get("POTETO_TOKEN_FILE") or os.environ.get("PAAS_TOKEN_FILE")
     if token_file:
         return Path(token_file).expanduser()
-    if not os.environ.get("PAAS_TOKEN") and url.rstrip("/") == DEFAULT_URL and default_token_file().is_file():
-        return default_token_file()
+    default = default_token_file()
+    if not (os.environ.get("POTETO_TOKEN") or os.environ.get("PAAS_TOKEN")) and default.is_file():
+        if url.rstrip("/") == DEFAULT_URL:
+            return default
+        stored = json.loads(default.read_text(encoding="utf-8-sig"))
+        if isinstance(stored, dict) and stored.get("poteto_url") == url.rstrip("/"):
+            return default
     return None
 
 
 def _show_plan(args, credential_file):
     try:
-        report = plan_deployment(args.directory, args.config, credential_file, preview=args.preview).summary()
+        report = plan_deployment(args.directory, args.config, credential_file, preview=args.preview,
+                                 production=args.prod).summary()
     except (PlanError, OSError) as error:
         if args.json:
             code = error.code if isinstance(error, PlanError) else "unreadable_project"
@@ -189,9 +197,13 @@ def _show_plan(args, credential_file):
 
 
 def main(prog="poteto"):
+    if sys.platform == "win32":
+        for output in (sys.stdout, sys.stderr):
+            if hasattr(output, "reconfigure"):
+                output.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog=prog)
     parser.add_argument("--version", action="version", version=f"{prog} {VERSION}")
-    parser.add_argument("--url", default=os.environ.get("PAAS_URL", DEFAULT_URL))
+    parser.add_argument("--url", help="API origin (overrides environment and directory link)")
     commands = parser.add_subparsers(dest="command", required=True)
     sign_in = commands.add_parser("login", help="Sign in with IF.Link in your browser")
     sign_in.add_argument("--output", type=Path, default=default_token_file())
@@ -201,10 +213,17 @@ def main(prog="poteto"):
     init.add_argument("directory", type=Path, nargs="?", default=Path("."))
     init.add_argument("--runtime", choices=["static", "node", "dockerfile"], default="static")
     if prog != "paas":
+        link = commands.add_parser("link", help="Remember an existing project for this directory; stores no credentials")
+        link.add_argument("directory", type=Path, nargs="?", default=Path("."))
+        link.add_argument("--project", help="Project ID (defaults to the project from poteto login)")
+        unlink_command = commands.add_parser("unlink", help="Remove only this directory's local project link")
+        unlink_command.add_argument("directory", type=Path, nargs="?", default=Path("."))
         plan = commands.add_parser("plan", help="Inspect a deployment locally without logging in or uploading")
         plan.add_argument("directory", type=Path, nargs="?", default=Path("."))
         plan.add_argument("--config", type=Path, help="Deployment configuration JSON")
-        plan.add_argument("--preview", action="store_true")
+        target = plan.add_mutually_exclusive_group()
+        target.add_argument("--preview", action="store_true")
+        target.add_argument("--prod", action="store_true", help="Plan an explicit production deployment")
         plan.add_argument("--json", action="store_true", help="Output a machine-readable result, including validation errors")
     commands.add_parser("doctor", help="Check API reachability and the current credential without printing it")
     commands.add_parser("whoami")
@@ -223,7 +242,7 @@ def main(prog="poteto"):
     project=commands.add_parser('project')
     actions=project.add_subparsers(dest='project_action',required=True)
     rename=actions.add_parser('rename');rename.add_argument('project');rename.add_argument('name')
-    status_project=actions.add_parser('status');status_project.add_argument('project')
+    status_project=actions.add_parser('status');status_project.add_argument('project',nargs='?')
     delete_project=actions.add_parser('delete');delete_project.add_argument('project')
     delete_project.add_argument('--destroy-data',action='store_true',help='Also destroy all project databases and stored files')
     delete_project.add_argument('--no-wait',action='store_true')
@@ -246,13 +265,15 @@ def main(prog="poteto"):
     deploy.add_argument("directory", type=Path, nargs="?", default=Path("."))
     deploy.add_argument("--project", help="Project ID (defaults to the project from poteto login)")
     deploy.add_argument("--config", type=Path, help="Deployment configuration JSON")
-    deploy.add_argument("--preview", action="store_true")
+    target = deploy.add_mutually_exclusive_group()
+    target.add_argument("--preview", action="store_true")
+    target.add_argument("--prod", action="store_true", help="Explicitly deploy to production")
     deploy.add_argument("--no-wait", action="store_true")
     deploy.add_argument("--url-only", action="store_true", help="Print only the ready HTTPS URL to stdout")
     deploy.add_argument("--timeout", type=int, default=900)
-    deployments = commands.add_parser("deployments", help="List releases in the current project")
+    deployments = commands.add_parser("deployments", aliases=["ls"], help="List releases in the current project")
     deployments.add_argument("--project", help="Project ID (defaults to the project from poteto login)")
-    status = commands.add_parser("status")
+    status = commands.add_parser("status", aliases=["inspect"], help="Inspect a deployment ID or Poteto URL")
     status.add_argument("deployment")
     logs = commands.add_parser("logs")
     logs.add_argument("deployment")
@@ -265,49 +286,56 @@ def main(prog="poteto"):
     for name in ["promote", "rollback"]:
         command = commands.add_parser(name)
         command.add_argument("deployment")
-        command.add_argument("--project", required=True)
+        command.add_argument("--project", help="Project ID (defaults to the directory link or login)")
     env = commands.add_parser("env")
-    env.add_argument("--project", required=True)
+    env.add_argument("--project", help="Project ID (defaults to the directory link or login)")
     env.add_argument("--target", choices=["production", "preview"], default="production")
     env.add_argument("--file", type=Path, help="JSON object of environment variables; values never printed")
     for name in ['database','volume']:
         data=commands.add_parser(name)
         actions=data.add_subparsers(dest='data_action',required=True)
         create=actions.add_parser('create')
-        create.add_argument('--project',required=True)
+        create.add_argument('--project',help='Project ID (defaults to the directory link or login)')
         create.add_argument('--stage',choices=['production','preview'],default='production')
-        listing=actions.add_parser('list');listing.add_argument('--project',required=True)
+        listing=actions.add_parser('list');listing.add_argument('--project',help='Project ID (defaults to the directory link or login)')
         retry=actions.add_parser('retry');retry.add_argument('resource')
         delete=actions.add_parser('delete');delete.add_argument('resource')
         delete.add_argument('--destroy-data',action='store_true',required=True,help='Explicitly destroy the stored data, after all bound releases are removed')
     args = parser.parse_args()
+    args.command = {"ls": "deployments", "inspect": "status"}.get(args.command, args.command)
     if args.command == "deploy" and args.no_wait and args.url_only:
         parser.error("--url-only requires waiting for the release")
     if args.command == "logs" and args.runtime and args.follow:
         parser.error("--follow is for build logs, not runtime snapshots")
     try:
+        if args.command == "unlink":
+            print(json.dumps(unlink(args.directory), indent=2))
+            return
         if args.command == "init":
             print(json.dumps(initialize(args.directory, args.runtime), indent=2, ensure_ascii=False))
             return
+        linked = find_link(getattr(args, "directory", Path("."))) if prog != "paas" else None
+        args.url = args.url or os.environ.get("POTETO_URL") or os.environ.get("PAAS_URL") or (linked.url if linked else DEFAULT_URL)
         if args.command == "login":
             print(json.dumps(login(Client(args.url), args.output), indent=2, ensure_ascii=False))
             return
         if args.command == "logout":
             print(json.dumps(logout(Client, args.url, args.file), indent=2))
             return
-        token_file = _credential_file(args.url)
         if args.command == "plan":
+            token_file = os.environ.get("POTETO_TOKEN_FILE") or os.environ.get("PAAS_TOKEN_FILE") or default_token_file()
             _show_plan(args, token_file)
             return
-        token = os.environ.get("PAAS_TOKEN")
+        token_file = _credential_file(args.url)
+        token = os.environ.get("POTETO_TOKEN") or os.environ.get("PAAS_TOKEN")
         signed_in_project = None
         if token_file:
-            value = token_file.read_text().strip()
+            value = token_file.read_text(encoding="utf-8-sig").strip()
             stored = json.loads(value) if value.startswith("{") else {"token": value}
             if "poteto_url" in stored:
                 if stored["poteto_url"] != args.url.rstrip("/"):
                     raise ValueError("This Poteto login file belongs to a different API")
-                signed_in_project = stored["project_id"]
+                signed_in_project = stored.get("project_id")
             token = stored["token"]
         if args.command == "doctor":
             client = Client(args.url, token)
@@ -328,10 +356,29 @@ def main(prog="poteto"):
             print(json.dumps(report, indent=2, ensure_ascii=False))
             return
         if not token:
-            parser.error("Run poteto login or set POTETO_TOKEN_FILE, PAAS_TOKEN_FILE, or PAAS_TOKEN")
+            parser.error("Run poteto login or set POTETO_TOKEN_FILE or POTETO_TOKEN (legacy PAAS_* variables also work)")
         client = Client(args.url, token)
+        linked_project = linked.project_id if linked and linked.url == client.url else None
+        if hasattr(args, "project"):
+            args.project = args.project or linked_project or signed_in_project
+            if args.project is None and args.command not in {"deploy", "deployments", "link"}:
+                parser.error("Choose a project with --project, poteto link, or poteto login")
+        if hasattr(args, "deployment"):
+            kind, reference = deployment_reference(args.deployment)
+            if kind == "project":
+                reference = client.request("GET", "/v1/projects/" + reference)["current_deployment"]
+                if not reference:
+                    raise ValueError("This project has no production deployment")
+            args.deployment = reference
         if args.command == "whoami":
             result = client.request("GET", "/v1/me")
+        elif args.command == "link":
+            if not args.project:
+                parser.error("link requires --project PROJECT_ID when using a manual token")
+            # Preview credentials can list their own releases without gaining
+            # broader project-management access.
+            client.request("GET", "/v1/projects/" + args.project + "/deployments")
+            result = write_link(args.directory, client.url, args.project)
         elif args.command == "token":
             if args.token_action == "create-preview":
                 with open(args.output,"x",opener=lambda path,flags:os.open(path,flags,0o600)) as out:
@@ -372,7 +419,7 @@ def main(prog="poteto"):
                 path='/v1/imports/'+args.target
                 result=client.request('POST',path+'/retry') if args.import_action=='retry' else client.request('DELETE' if args.import_action=='delete' else 'GET',path)
         elif args.command == "deploy":
-            project_id = args.project or signed_in_project
+            project_id = args.project
             if not project_id:
                 parser.error("deploy requires --project PROJECT_ID when using a manual token")
             if prog == "paas":
@@ -381,10 +428,12 @@ def main(prog="poteto"):
                 config = deployment_config(args.directory, args.config)
                 source = pack(args.directory, token_file)
             else:
-                prepared = plan_deployment(args.directory, args.config, token_file, preview=args.preview)
+                prepared = plan_deployment(args.directory, args.config, token_file, preview=args.preview, production=args.prod)
                 config = prepared.config
                 source = pack(prepared.directory, files=prepared.files)
-            if args.preview or (signed_in_project and "target" not in config):
+            if args.prod:
+                config["target"] = "production"
+            elif args.preview or ((signed_in_project or linked_project) and "target" not in config):
                 config["target"] = "preview"
             if len(source) > 50 * 1024 * 1024:
                 raise RuntimeError("Archive exceeds the server upload limit of 50 MiB")
@@ -402,7 +451,7 @@ def main(prog="poteto"):
                 print(result["production_url"] if config.get("target", "production") == "production" else result["url"])
                 return
         elif args.command == "deployments":
-            project_id = args.project or signed_in_project
+            project_id = args.project
             if not project_id:
                 parser.error("deployments requires --project PROJECT_ID when using a manual token")
             result = client.request("GET", f"/v1/projects/{project_id}/deployments")
@@ -428,7 +477,7 @@ def main(prog="poteto"):
             result = client.request("POST", f"/v1/projects/{args.project}/{args.command}", {"deployment_id": args.deployment})
         elif args.command == "env":
             path=f"/v1/projects/{args.project}/env"+("?target=preview" if args.target=="preview" else "")
-            result = client.request("PUT", path, {"values": json.loads(args.file.read_text())}) if args.file else client.request("GET", path)
+            result = client.request("PUT", path, {"values": json.loads(args.file.read_text(encoding="utf-8-sig"))}) if args.file else client.request("GET", path)
         elif args.command in {'database','volume'}:
             if args.data_action=='create':
                 result=client.request('POST',f'/v1/projects/{args.project}/'+('databases' if args.command=='database' else 'volumes'),{'stage':args.stage})

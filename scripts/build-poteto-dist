@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from publisher.cli_tools import VERSION
 
-MODULES = ("__init__.py", "cli.py", "cli_login.py", "cli_tools.py", "login_contract.py", "transfer_wire.py")
+MODULES = ("__init__.py", "cli.py", "cli_login.py", "cli_tools.py", "cli_project.py", "login_contract.py", "transfer_wire.py")
 SKILL = Path("skills/poteto-deploy/SKILL.md")
 
 
@@ -22,12 +22,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("output", type=Path)
     parser.add_argument("--url", required=True, help="Public HTTPS origin serving the installer and archive")
+    parser.add_argument("--api-url", help="Default HTTPS API origin embedded in this CLI distribution")
     args = parser.parse_args()
     origin = args.url.rstrip("/")
     url = urlsplit(origin)
     if (url.scheme != "https" or not url.hostname or url.username is not None or url.path or url.query or url.fragment
             or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:/" for c in origin)):
         parser.error("--url must be an HTTPS origin")
+    api_origin = args.api_url.rstrip("/") if args.api_url else None
+    if api_origin:
+        api = urlsplit(api_origin)
+        if (api.scheme != "https" or not api.hostname or api.username is not None or api.path or api.query or api.fragment
+                or any(c not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-:/" for c in api_origin)):
+            parser.error("--api-url must be an HTTPS origin")
     if tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"] != VERSION:
         raise SystemExit("CLI and package versions must match")
     args.output.mkdir(parents=True, exist_ok=True)
@@ -37,16 +44,25 @@ def main():
         package.mkdir()
         for filename in MODULES:
             shutil.copyfile(ROOT / "publisher" / filename, package / filename)
+        if api_origin:
+            contract = package / "login_contract.py"
+            lines = contract.read_text().splitlines()
+            contract.write_text("\n".join("DEFAULT_URL = " + repr(api_origin) if line.startswith("DEFAULT_URL = ") else line
+                                          for line in lines) + "\n")
         (root / "__main__.py").write_text("from publisher.cli import main\nmain()\n")
         zipapp.create_archive(root, args.output / f"poteto-{VERSION}.pyz",
                               interpreter="/usr/bin/env python3", compressed=True)
     template = (ROOT / "scripts/install-poteto.sh").read_text()
     installer = template.replace("@POTETO_BASE_URL@", origin).replace("@POTETO_VERSION@", VERSION)
     (args.output / "install.sh").write_text(installer)
+    template = (ROOT / "scripts/install-poteto.ps1").read_text()
+    (args.output / "install.ps1").write_text(template.replace("@POTETO_BASE_URL@", origin).replace("@POTETO_VERSION@", VERSION))
     skill = args.output / SKILL
     skill.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(ROOT / SKILL, skill)
+    skill.write_text((ROOT / SKILL).read_text().replace(
+        "https://poteto.iflink.tech", origin))
     command = html.escape(f"curl -fsSL {origin}/install.sh | sh")
+    powershell = html.escape(f"irm {origin}/install.ps1 | iex")
     (args.output / "index.html").write_text(f"""<!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>安装 Poteto CLI</title>
@@ -57,9 +73,11 @@ h1{{font-size:clamp(42px,9vw,100px);line-height:1.05;letter-spacing:-.06em;margi
 p{{color:#466052}}pre{{padding:18px;background:#132e24;color:#e2f4c1;border-radius:10px;white-space:pre-wrap;overflow-wrap:anywhere}}a{{color:#225c41}}
 </style>
 <main><header><strong>Poteto</strong><span>CLI / {VERSION}</span></header>
-<h1>从终端发布。</h1><p>macOS 或 Linux，需 Python 3.10+。无需 sudo。</p>
-<pre><code>{command}</code></pre><p>先运行 <code>poteto plan .</code> 检查发布目录，再登录并运行 <code>poteto deploy . --preview</code>。</p>
-<a href="/install.sh">查看安装脚本</a> · <a href="/poteto-{VERSION}.pyz">下载 CLI</a> · <a href="/{SKILL.as_posix()}">Agent Skill</a>
+<h1>从终端发布。</h1><p>Windows、macOS 或 Linux，需 Python 3.10+。无需管理员权限。</p>
+<p>macOS / Linux</p><pre><code>{command}</code></pre>
+<p>Windows · PowerShell 7+</p><pre><code>{powershell}</code></pre>
+<p>运行 <code>poteto login</code>，用 <code>poteto plan .</code> 预检，再用 <code>poteto deploy . --preview</code> 发布。</p>
+<a href="/install.sh">Shell 脚本</a> · <a href="/install.ps1">PowerShell 脚本</a> · <a href="/poteto-{VERSION}.pyz">下载 CLI</a> · <a href="/{SKILL.as_posix()}">Agent Skill</a>
 </main></html>""")
     print(args.output.resolve())
 

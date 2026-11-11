@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import sys
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit
 import webbrowser
@@ -17,7 +18,10 @@ else:
 
 
 def default_token_file():
-    return Path.home() / ".config/poteto/token.json"
+    legacy = Path.home() / ".config/poteto/token.json"
+    if sys.platform == "win32" and not legacy.exists() and os.environ.get("LOCALAPPDATA"):
+        return Path(os.environ["LOCALAPPDATA"]) / "Poteto" / "token.json"
+    return legacy
 
 
 class CallbackServer(HTTPServer):
@@ -91,7 +95,7 @@ def login(client, output):
     if config.get("issuer") != ISSUER or not config.get("client_id"):
         raise RuntimeError("This endpoint does not offer Poteto login with IF.Link")
     # Reserve the destination before authenticating or issuing a token.
-    with open(output, "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as out:
+    with open(output, "x", encoding="utf-8", opener=lambda path, flags: os.open(path, flags, 0o600)) as out:
         try:
             result = client.request("POST", LOGIN_PATH, authorize(config["client_id"]))
             token = result.pop("token")
@@ -105,7 +109,7 @@ def login(client, output):
 
 def logout(client_type, url, path):
     path = path.expanduser()
-    value = json.loads(path.read_text())
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
     if value.get("poteto_url") != url.rstrip("/"):
         raise RuntimeError("Choose a Poteto login file for this API with --file")
     client = client_type(url, value["token"])
