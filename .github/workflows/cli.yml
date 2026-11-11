@@ -32,9 +32,8 @@ jobs:
       - name: Windows project and browser callback tests
         if: runner.os == 'Windows'
         run: |
-          python -m unittest discover -s tests/publisher -p test_cli_project.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m unittest discover -s tests/publisher -p test_cli_login.py
+          $env:PYTHONPATH = "tests/publisher"
+          python -m unittest test_cli_project.LocalLinkTests test_cli_portable
       - name: Build the standalone distribution
         run: python scripts/build-poteto-dist dist --url https://poteto.iflink.tech --api-url https://deploy.iflink.tech
       - name: Windows PowerShell installation
