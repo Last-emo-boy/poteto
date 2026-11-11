@@ -123,6 +123,15 @@ class ProjectCliTests(unittest.TestCase):
         self.assertIn("HTTP 403",error)
         self.command("plan",".","--preview","--prod",status=2)
 
+    def test_untrusted_link_cannot_redirect_a_manual_token_to_a_custom_api(self):
+        self.link()
+        with patch.dict(os.environ,{"POTETO_TOKEN_FILE":"","POTETO_TOKEN":self.secret}):
+            with patch.object(cli, "Client") as client:
+                _,error=self.command("ls",status=1)
+                self.assertIn("confirm it with --url",error)
+                client.assert_not_called()
+            self.assertEqual([],self.command("--url",self.url,"ls")[0])
+
     def test_inspect_accepts_preview_url_and_logs_keep_the_existing_id_contract(self):
         self.link()
         release=self.command("deploy",".","--no-wait")[0]

@@ -315,7 +315,8 @@ def main(prog="poteto"):
             print(json.dumps(initialize(args.directory, args.runtime), indent=2, ensure_ascii=False))
             return
         linked = find_link(getattr(args, "directory", Path("."))) if prog != "paas" else None
-        args.url = args.url or os.environ.get("POTETO_URL") or os.environ.get("PAAS_URL") or (linked.url if linked else DEFAULT_URL)
+        explicit_url = args.url or os.environ.get("POTETO_URL") or os.environ.get("PAAS_URL")
+        args.url = explicit_url or (linked.url if linked else DEFAULT_URL)
         if args.command == "login":
             print(json.dumps(login(Client(args.url), args.output), indent=2, ensure_ascii=False))
             return
@@ -329,14 +330,18 @@ def main(prog="poteto"):
         token_file = _credential_file(args.url)
         token = os.environ.get("POTETO_TOKEN") or os.environ.get("PAAS_TOKEN")
         signed_in_project = None
+        bound_credential = False
         if token_file:
             value = token_file.read_text(encoding="utf-8-sig").strip()
             stored = json.loads(value) if value.startswith("{") else {"token": value}
             if "poteto_url" in stored:
                 if stored["poteto_url"] != args.url.rstrip("/"):
                     raise ValueError("This Poteto login file belongs to a different API")
+                bound_credential = True
                 signed_in_project = stored.get("project_id")
             token = stored["token"]
+        if token and linked and not explicit_url and linked.url != DEFAULT_URL and not bound_credential:
+            raise ValueError("A directory link cannot choose a custom API for a manual token; confirm it with --url or POTETO_URL")
         if args.command == "doctor":
             client = Client(args.url, token)
             report = {"version": VERSION, "api": client.url, "python": ".".join(map(str, sys.version_info[:3])),
