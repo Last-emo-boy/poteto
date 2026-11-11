@@ -50,6 +50,8 @@ Use `poteto deploy . --prod` only when you intend a production deployment and ha
 
 Agents can follow the [Poteto preview skill](skills/poteto-deploy/SKILL.md) for installation, preflight, publishing, and verification.
 
+Use `poteto logs DEPLOYMENT_ID --follow` to watch a build as it runs, including a deployment started with `--no-wait`. Build output goes to stderr; the final deployment remains JSON on stdout.
+
 ## Runtime variables and redeploys
 
 ```sh

@@ -9,6 +9,7 @@ from pathlib import Path
 import pwd
 import re
 import secrets
+import selectors
 import shlex
 import shutil
 import socket
@@ -22,6 +23,7 @@ RESTORES = Path('/srv/ovh-paas-platform/restore')
 CODE = Path(__file__).resolve().parents[1]
 RUNTIME_VERSION = "11"
 ID = re.compile(r"[a-f0-9]{24}")
+BUILD_LOG_LIMIT = 2 * 1024**2
 
 
 class ExecutionError(RuntimeError):
@@ -369,7 +371,51 @@ def status(build_id):
     result = json.loads(path.read_text())
     if result["state"] in {"queued", "running"} and unit_state(f"paas-build@{build_id}.service") in {"inactive", "failed"}:
         result |= {"state": "failed", "error": "Build supervisor terminated; inspect the existing job before resubmission"}
-    return result
+    return result | {'log_chunks': True}
+
+
+def build_log_chunk(build_id, offset):
+    path = ROOT / 'builds' / checked_id(build_id) / 'build.log'
+    if not 0 <= offset <= BUILD_LOG_LIMIT:
+        raise ValueError('Invalid build log offset')
+    try:
+        with path.open('rb') as log:
+            log.seek(offset)
+            chunk = log.read(min(65536, BUILD_LOG_LIMIT - offset))
+    except FileNotFoundError:
+        chunk = b''  # The builder has not started emitting output yet.
+    return {'data': base64.b64encode(chunk).decode('ascii')}
+
+
+def collect_build_output(command, path, timeout):
+    """Drain both SSH channels, publishing bounded stderr before the receipt."""
+    deadline = time.monotonic() + timeout
+    receipt = bytearray()
+    with path.open('wb', buffering=0) as log, selectors.DefaultSelector() as selector, \
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+        selector.register(process.stdout, selectors.EVENT_READ, 'receipt')
+        selector.register(process.stderr, selectors.EVENT_READ, 'log')
+        try:
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or not (events := selector.select(remaining)):
+                    raise subprocess.TimeoutExpired(command, timeout)
+                for key, _ in events:
+                    data = os.read(key.fd, 8192)
+                    if not data:
+                        selector.unregister(key.fileobj)
+                    elif key.data == 'log':
+                        log.write(data[:max(0, BUILD_LOG_LIMIT - log.tell())])
+                    else:
+                        if len(receipt) + len(data) > 4096:
+                            raise ExecutionError('Guest build receipt exceeds its limit')
+                        receipt.extend(data)
+            if process.wait(timeout=max(0, deadline - time.monotonic())):
+                raise ExecutionError('Guest build session failed; inspect deployment logs')
+            return json.loads(receipt)
+        finally:
+            if process.poll() is None:
+                process.kill()
 
 
 def run_build(build_id):
@@ -400,11 +446,9 @@ def run_build(build_id):
             ssh(22099, alias, "sudo -n tee /work/spec.json >/dev/null", data=json.dumps(spec | {"id": build_id}).encode())
             with (job / "source.tar.gz").open("rb") as source:
                 subprocess.run(["/opt/paas-execution/ssh-stream", str(22099), alias, "sudo -n tee /work/source.tar.gz >/dev/null"], stdin=source, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=120)
-            # The guest script caps its build log before export; it never receives production credentials.
-            result = ssh(22099, alias, "sudo -n python3 /opt/paas-execution/guest_build.py", timeout=900)
-            log = ssh(22099, alias, "sudo -n cat /work/build.log", timeout=30).stdout
-            (job / "build.log").write_bytes(log[:2 * 1024**2])
-            if json.loads(result.stdout)["state"] != "succeeded":
+            command = ['/opt/paas-execution/ssh-stream', '22099', alias,
+                       'sudo -n env POTETO_STREAM_BUILD_LOG=1 python3 /opt/paas-execution/guest_build.py']
+            if collect_build_output(command, job / 'build.log', timeout=900)['state'] != 'succeeded':
                 raise ExecutionError("Application build failed; inspect deployment logs")
             image_disk_bytes=int(ssh(22099,alias,'sudo -n docker image inspect --format "{{.Size}}" paas-release:'+build_id).stdout.strip())
             if not 0<image_disk_bytes<=16*1024**3:
@@ -428,12 +472,9 @@ def run_build(build_id):
             (job / "image.tar.next").replace(job / "image.tar")
             write_json(job / "status.json", {"id": build_id, "state": "succeeded", "image": "paas-release:" + build_id, "image_bytes": size, "image_disk_bytes":image_disk_bytes, "boot_id": boot_id})
         except Exception as error:
-            # Keep bounded guest output when a command times out, not just on success.
-            try:
-                log = ssh(22099, alias, 'sudo -n tail -c 2097152 /work/build.log', timeout=15).stdout
-                (job / 'build.log').write_bytes(log)
-            except (subprocess.SubprocessError, OSError):
-                (job / 'build.log').write_text('Guest build output was unavailable after ' + type(error).__name__)
+            # Never rewrite bytes that a live reader may already have consumed.
+            if not (job / 'build.log').exists():
+                (job / 'build.log').write_text('Guest build output was unavailable after ' + type(error).__name__ + '\n')
             message = (f"Build step exceeded its {error.timeout}-second time limit; inspect deployment logs"
                        if isinstance(error, subprocess.TimeoutExpired) else
                        str(error) if isinstance(error, ExecutionError) else "Host build driver failed")
@@ -675,6 +716,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 checked_id(parts[2])
                 path = ROOT / "builds" / parts[2] / "build.log"
                 return self.response(200, {"log": path.read_text(errors="replace") if path.exists() else ""})
+            if len(parts) == 5 and parts[:2] == ['v1', 'builds'] and parts[3] == 'logs':
+                return self.response(200, build_log_chunk(parts[2], int(parts[4])))
             if len(parts)==4 and parts[:2]==['v1','builds'] and parts[3]=='image':
                 return self.send_image(parts[2])
             if len(parts) == 3 and parts[:2] == ["v1", "builds"]:

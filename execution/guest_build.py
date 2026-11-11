@@ -1,8 +1,10 @@
 """Executed only in a fresh build VM. Produces one canonical Docker image."""
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 from urllib.parse import urlsplit
 from publisher.archive import unpack
 
@@ -40,16 +42,21 @@ def dockerfile(spec):
     return "\n".join(lines) + "\n"
 
 
+def record_log(log, data):
+    data = data[:max(0, 2 * 1024**2 - log.tell())]
+    if data:
+        log.write(data)
+        log.flush()
+        if os.environ.get('POTETO_STREAM_BUILD_LOG') == '1':
+            sys.stderr.buffer.write(data)
+            sys.stderr.buffer.flush()
+
+
 def logged(command):
     process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-    written = 0
     with (WORK / "build.log").open("wb") as log:
         while chunk := process.stdout.read1(8192):
-            if written < 2 * 1024**2:
-                part = chunk[:2 * 1024**2 - written]
-                log.write(part)
-                log.flush()
-                written += len(part)
+            record_log(log, chunk)
     return process.wait()==0
 
 
@@ -100,5 +107,6 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as error:
-        (WORK / "build.log").write_text(type(error).__name__ + ": " + str(error))
+        with (WORK / "build.log").open("ab") as log:
+            record_log(log, (type(error).__name__ + ": " + str(error) + "\n").encode('utf-8', errors='replace'))
         print(json.dumps({"state": "failed"}))

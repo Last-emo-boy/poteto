@@ -59,6 +59,23 @@ class RemoteBackendTests(unittest.TestCase):
                 self.backend.prepare_remote(self.release,self.root/'source.tar.gz',lambda _:None)
         client.start_build.assert_not_called()
 
+    def test_progress_is_logged_while_the_existing_build_is_running(self):
+        registry = Mock(); registry.ensure.return_value = {'server_id': 'server', 'http_port': 22200}
+        client = Mock(); lines = []
+        def status(_):
+            if client.build_status.call_count == 1:
+                return {'state': 'running', 'log_chunks': True}
+            self.assertIn('compile started', lines)
+            return {'state': 'succeeded', 'log_chunks': True, 'image': 'paas-release:' + self.release['id']}
+        client.build_status.side_effect = status
+        client.build_log_chunk.side_effect = [b'compile started\n', b'finished\n', b'']
+        with patch('publisher.runtime.RuntimeRegistry', return_value=registry), \
+             patch.object(self.backend, 'execution_client', return_value=client), patch('publisher.backend.time.sleep'):
+            self.backend.prepare_remote(self.release, self.root/'source.tar.gz', lines.append)
+        self.assertEqual(['compile started', 'finished'], lines[1:])
+        client.start_build.assert_not_called()
+        client.build_logs.assert_not_called()
+
     def test_migration_is_runtime_only_and_data_mounts_remain_external(self):
         config=json.loads(self.release['config'])|{'database_id':'a'*24,'volume_id':'b'*24,'migration_command':'python migrate.py'}
         self.release['config']=json.dumps(config)

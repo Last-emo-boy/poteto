@@ -346,6 +346,7 @@ class Dokploy:
             raise
 
     def prepare_remote(self, deployment, archive, log, check=None, before_migrate=None, *, imported=None):
+        from publisher.executor import BuildOutput
         from publisher.runtime import RuntimeRegistry
         config = json.loads(deployment['config'])
         with self.store.connection() as db:
@@ -369,17 +370,22 @@ class Dokploy:
                 build={'runtime':'image-import','image_reference':imported['reference']};archive=imported['image_path']
             status = client.start_build(deployment['id'], build | {'account_id': account_id}, archive)
         log('Isolated build job: ' + deployment['id'])
+        output = BuildOutput(client, deployment['id'], log)
         deadline = time.monotonic() + 1250
         while status['state'] in {'queued', 'running'}:
             if check:
                 check()
             if time.monotonic() >= deadline:
                 raise BackendError('Build observation deadline exceeded; existing supervised job must be reconciled')
+            if status.get('log_chunks') is True:
+                output.read()
             time.sleep(2)
             status = client.build_status(deployment['id'])
-        details = client.build_logs(deployment['id'])
-        for line in details.splitlines():
-            log(line)
+        if status.get('log_chunks') is True:
+            output.read(final=True)
+        else:
+            for line in client.build_logs(deployment['id']).splitlines():
+                log(line)
         if status['state'] != 'succeeded':
             raise BackendError(status.get('error', 'Isolated build failed'))
         if check:

@@ -62,10 +62,16 @@ class Client:
         cursor = 0
         while time.monotonic() < deadline:
             release = self.request("GET", "/v1/deployments/" + release_id)
-            logs = self.request("GET", f"/v1/deployments/{release_id}/logs?after={cursor}")
-            for line in logs["logs"]:
-                print(line["message"], file=sys.stderr)
-            cursor = logs["next_cursor"]
+            while True:
+                logs = self.request("GET", f"/v1/deployments/{release_id}/logs?after={cursor}")
+                for line in logs["logs"]:
+                    print(line["message"], file=sys.stderr, flush=True)
+                if len(logs["logs"]) < 500:
+                    cursor = logs["next_cursor"]
+                    break
+                if logs["next_cursor"] <= cursor:
+                    raise RuntimeError('Build log cursor did not advance')
+                cursor = logs["next_cursor"]
             if release["state"] != previous:
                 print(release["state"], file=sys.stderr)
                 previous = release["state"]

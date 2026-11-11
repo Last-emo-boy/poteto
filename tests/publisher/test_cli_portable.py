@@ -18,6 +18,17 @@ from publisher import cli, cli_login
 
 
 class PortableClientTests(unittest.TestCase):
+    def test_wait_drains_all_log_pages_before_returning_ready(self):
+        client = cli.Client('https://deploy.iflink.tech')
+        ready = {'state': 'ready', 'url': 'https://example.test'}
+        first = {'logs': [{'message': str(i)} for i in range(500)], 'next_cursor': 500}
+        last = {'logs': [{'message': 'last log'}], 'next_cursor': 501}
+        output = io.StringIO()
+        with patch.object(client, 'request', side_effect=[ready, first, last]) as request, redirect_stderr(output):
+            self.assertEqual(ready, client.wait('fixture', 10))
+        self.assertIn('last log\nready\n', output.getvalue())
+        self.assertTrue(request.call_args.args[1].endswith('?after=500'))
+
     def test_directory_link_upload_inspect_and_scope_error_over_real_http(self):
         project, release = "a"*24, "b"*24
         state = {"archive": None, "config": None, "authorized": 0, "environment": {}}

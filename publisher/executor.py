@@ -12,6 +12,46 @@ class ExecutionFailure(RuntimeError):
     pass
 
 
+class BuildOutput:
+    """Read complete UTF-8 lines from a bounded byte log without replaying chunks."""
+
+    def __init__(self, client, build_id, emit):
+        self.client, self.build_id, self.emit = client, build_id, emit
+        self.offset = self.lines = 0
+        self.pending = b''
+
+    def line(self, data):
+        if self.lines >= 4000:
+            if self.lines == 4000:
+                self.emit('Build output limited to 4000 lines')
+                self.lines += 1
+            return
+        self.emit(data.rstrip(b'\r').decode('utf-8', errors='replace'))
+        self.lines += 1
+
+    def read(self, *, final=False):
+        while self.lines <= 4000:
+            try:
+                chunk = self.client.build_log_chunk(self.build_id, self.offset)
+            except ObservationUnavailable:
+                if final:
+                    raise
+                return  # A progress read can wait for the next observation of the same job.
+            if not chunk:
+                break
+            self.offset += len(chunk)
+            *lines, self.pending = (self.pending + chunk).split(b'\n')
+            for line in lines:
+                self.line(line)
+                if self.lines > 4000:
+                    break
+            if not final:
+                return
+        if final and self.pending:
+            self.line(self.pending)
+            self.pending = b''
+
+
 class ExecutionClient:
     def __init__(self, config):
         parsed = urllib.parse.urlparse(config["url"])
@@ -63,6 +103,10 @@ class ExecutionClient:
 
     def build_logs(self, build_id):
         return self.request("GET", "/v1/builds/" + build_id + "/logs")["log"]
+
+    def build_log_chunk(self, build_id, offset):
+        result = self.request('GET', f'/v1/builds/{build_id}/logs/{offset}', timeout=10)
+        return base64.b64decode(result['data'], validate=True)
 
     def build_operation(self, account_id, build_id, action):
         if action not in {'cancel', 'delete'}:
