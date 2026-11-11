@@ -2,6 +2,10 @@
 set -euo pipefail
 ROOT=/opt/paas-runtime
 install -d -m 0755 /etc/dokploy/paas/wake /etc/dokploy/traefik/dynamic
+# Preserve existing overlay networks; fresh single-VM runtimes need only a bridge.
+if ! docker network inspect dokploy-network >/dev/null 2>&1; then
+ docker network create --driver bridge dokploy-network
+fi
 PAAS_PUBLISHER_ALIASES=/etc/dokploy/paas/production.json python3 "$ROOT/configure-wakeup.py" --prepare
 cat > /etc/dokploy/traefik/traefik.yml <<'JSON'
 {"global":{"sendAnonymousUsage":false},"providers":{"file":{"directory":"/etc/dokploy/traefik/dynamic","watch":true}},"entryPoints":{"web":{"address":":80","forwardedHeaders":{"trustedIPs":["10.201.0.2/32"]}}}}

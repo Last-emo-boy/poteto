@@ -46,17 +46,19 @@ class RuntimeRegistry:
                 servers = self.backend.api('server.all')
                 server = next((s for s in servers if s['name'] == name), None)
                 if server is None:
-                    server = self.backend.api('server.create', {'name': name, 'description': 'KVM tenant runtime on existing OVH',
+                    server = self.backend.api('server.create', {'name': name, 'description': 'Poteto isolated tenant runtime',
                         'ipAddress': '10.201.0.2', 'port': target['ssh_port'], 'username': 'root',
                         'sshKeyId': registry['ssh_key_id'], 'serverType': 'deploy', 'enableDockerCleanup': False})
                 registry['tenants'][account_id] = target | {'server_id': server['serverId'], 'prepared': False}
                 self.save(registry)
             record = registry['tenants'][account_id]
+            # The executor owns these preinstalled VMs. Dokploy's general server
+            # installer also installs build tools and Traefik, and keeps running
+            # after an HTTP timeout. Never launch it for a managed runtime.
+            self.executor.bootstrap(account_id)
             if not record['prepared']:
-                self.backend.api('server.setup', {'serverId': record['server_id']})
                 record['prepared'] = True
                 self.save(registry)
-            self.executor.bootstrap(account_id)
             return record
 
     def retire(self, account_id):
