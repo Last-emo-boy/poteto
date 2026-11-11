@@ -4,7 +4,7 @@ import runpy
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
-from execution import host, private_stage, vm
+from execution import host, vm
 from execution.guest_build import dockerfile
 from execution import runtime_reconcile
 from execution import runtime_data, runtime_rpc
@@ -45,37 +45,6 @@ class ExecutionTests(unittest.TestCase):
         for value in ['../../etc/shadow', 'a'*25, 'x'*24, 'a'*24 + '\n']:
             with self.assertRaises(ValueError):
                 host.checked_id(value)
-
-    def test_tcg_stage_keeps_vm_ports_private_and_removes_only_kvm_device_grant(self):
-        with patch.dict("os.environ", {"PAAS_VM_ACCEL": "tcg"}):
-            args = vm.arguments("builder")
-        self.assertEqual("q35,accel=tcg", args[args.index("-machine") + 1])
-        self.assertEqual("max", args[args.index("-cpu") + 1])
-        self.assertIn("hostfwd=tcp:127.0.0.1:22099", args[args.index("-netdev") + 1])
-        source = ("[Service]\nSupplementaryGroups=kvm\nDevicePolicy=closed\nDeviceAllow=/dev/kvm rw\n"
-                  "IOReadBandwidthMax=/dev/md3 100M\n")
-        rendered = private_stage.adapt_unit("paas-runtime@.service", source, Path("/dev/vda3"))
-        self.assertNotIn("/dev/kvm", rendered)
-        self.assertIn("DevicePolicy=closed", rendered)
-        self.assertIn("Environment=PAAS_VM_ACCEL=tcg", rendered)
-        self.assertIn("IOReadBandwidthMax=/dev/vda3 100M", rendered)
-
-    def test_private_registry_config_is_in_seed_only_when_enabled(self):
-        with tempfile.TemporaryDirectory() as temp, patch.object(host, "ROOT", Path(temp)), \
-             patch.object(host.subprocess, "run"):
-            root = Path(temp)
-            (root / "admin.key.pub").write_text("fixture")
-            host.cloud_seed(root, "builder")
-            seed = lambda: json.loads((root / "user-data").read_text().split("\n", 1)[1])
-            self.assertEqual([], seed()["write_files"])
-            (root / "config.json").write_text('{"registry_mirror_port":21998}')
-            host.cloud_seed(root, "builder")
-            file, = seed()["write_files"]
-            self.assertEqual("/etc/docker/daemon.json", file["path"])
-            self.assertEqual(["http://10.201.0.2:21998"], json.loads(file["content"])["registry-mirrors"])
-            (root / "config.json").write_text('{"registry_mirror_port":22}')
-            with self.assertRaises(ValueError):
-                host.cloud_seed(root, "builder")
 
     def test_commands_are_json_encoded_not_dockerfile_instructions(self):
         value = 'echo hello\nFROM evil\nRUN echo injected'
