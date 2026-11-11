@@ -375,6 +375,24 @@ class Store:
             self.audit(db, actor, "deployment.create", deployment_id)
             return dict(db.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone())|{'app_domain':project['app_domain']}
 
+    def patch_environment(self, actor, project_id, values, remove, target):
+        from pydantic import ValidationError
+        from publisher.models import EnvironmentInput
+        with self.connection() as db:
+            project = self.project(db, actor, project_id, "env:write")
+            current = self.environment(project, target)
+            current.update(values)
+            for key in remove:
+                current.pop(key, None)
+            try:
+                EnvironmentInput(values=current)
+            except ValidationError:
+                raise Problem(422, "Combined environment exceeds the variable or size limits") from None
+            column = "preview_environment" if target == "preview" else "environment"
+            db.execute(f"UPDATE projects SET {column}=? WHERE id=?", (self.seal(current), project_id))
+            self.audit(db, actor, "environment.patch." + target, project_id)
+        return {"keys": sorted(current), "applies_to": "new deployments"}
+
     def begin_upload(self, actor, deployment_id, upload_id):
         if shutil.disk_usage(self.settings.root).free < 1024 * 1024 * 1024 + self.settings.upload_limit:
             raise Problem(507, "Upload refused to preserve the platform's free disk reserve")

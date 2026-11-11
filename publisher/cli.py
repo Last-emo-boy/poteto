@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """Portable publishing client. Uses Python's standard library only."""
 import argparse
+import getpass
 import json
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
+import warnings
 
 if __package__:
     from .cli_login import default_token_file, login, logout
@@ -28,8 +32,10 @@ class Client:
     def __init__(self, url, token=None):
         self.url, self.token = url.rstrip("/"), token
 
-    def request(self, method, path, body=None, raw=False):
+    def request(self, method, path, body=None, raw=False, *, idempotency_key=None):
         headers = {"User-Agent": "Poteto/" + VERSION}
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
         if self.token:
             headers["Authorization"] = "Bearer " + self.token
         if raw:
@@ -44,7 +50,8 @@ class Client:
                 return json.loads(data) if data else None
         except urllib.error.HTTPError as error:
             try:
-                message = json.loads(error.read())
+                with error:
+                    message = json.loads(error.read())
             except (ValueError, UnicodeDecodeError):
                 message = {"error": f"HTTP {error.code}"}
             raise RuntimeError(f"HTTP {error.code}: {json.dumps(message, ensure_ascii=False)}") from None
@@ -177,7 +184,7 @@ def _credential_file(url):
 def _show_plan(args, credential_file):
     try:
         report = plan_deployment(args.directory, args.config, credential_file, preview=args.preview,
-                                 production=args.prod).summary()
+                                 production=args.prod, preset=args.preset).summary()
     except (PlanError, OSError) as error:
         if args.json:
             code = error.code if isinstance(error, PlanError) else "unreadable_project"
@@ -196,9 +203,33 @@ def _show_plan(args, credential_file):
     print(f"Files to upload: {report['upload_files']}")
 
 
+def _environment_value(args):
+    if args.file:
+        with args.file.open(encoding="utf-8-sig", newline="") as source:
+            value = source.read(16385)
+    elif args.stdin:
+        value = sys.stdin.read(16387)
+        if value.endswith("\r\n"):
+            value = value[:-2]
+        elif value.endswith("\n"):
+            value = value[:-1]
+    elif sys.stdin.isatty():
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            try:
+                value = getpass.getpass(args.name + ": ")
+            except getpass.GetPassWarning:
+                raise RuntimeError("Hidden input is unavailable; use --stdin or --file") from None
+    else:
+        raise RuntimeError("Use --stdin or --file to set a value without an interactive terminal")
+    if len(value) > 16384 or "\x00" in value:
+        raise ValueError("Variable values must contain at most 16384 characters and no NUL")
+    return value
+
+
 def main(prog="poteto"):
     if sys.platform == "win32":
-        for output in (sys.stdout, sys.stderr):
+        for output in (sys.stdin, sys.stdout, sys.stderr):
             if hasattr(output, "reconfigure"):
                 output.reconfigure(encoding="utf-8")
     parser = argparse.ArgumentParser(prog=prog)
@@ -221,6 +252,7 @@ def main(prog="poteto"):
         plan = commands.add_parser("plan", help="Inspect a deployment locally without logging in or uploading")
         plan.add_argument("directory", type=Path, nargs="?", default=Path("."))
         plan.add_argument("--config", type=Path, help="Deployment configuration JSON")
+        plan.add_argument("--preset", choices=["nextjs", "vite"], help="Apply a framework's build and runtime defaults")
         target = plan.add_mutually_exclusive_group()
         target.add_argument("--preview", action="store_true")
         target.add_argument("--prod", action="store_true", help="Plan an explicit production deployment")
@@ -265,12 +297,23 @@ def main(prog="poteto"):
     deploy.add_argument("directory", type=Path, nargs="?", default=Path("."))
     deploy.add_argument("--project", help="Project ID (defaults to the project from poteto login)")
     deploy.add_argument("--config", type=Path, help="Deployment configuration JSON")
+    if prog != "paas":
+        deploy.add_argument("--preset", choices=["nextjs", "vite"])
     target = deploy.add_mutually_exclusive_group()
     target.add_argument("--preview", action="store_true")
     target.add_argument("--prod", action="store_true", help="Explicitly deploy to production")
     deploy.add_argument("--no-wait", action="store_true")
     deploy.add_argument("--url-only", action="store_true", help="Print only the ready HTTPS URL to stdout")
     deploy.add_argument("--timeout", type=int, default=900)
+    redeploy = commands.add_parser("redeploy", help="Rebuild archived source with current runtime variables; defaults to preview")
+    redeploy.add_argument("deployment", help="Deployment ID or Poteto URL")
+    target = redeploy.add_mutually_exclusive_group()
+    target.add_argument("--prod", action="store_true")
+    target.add_argument("--preview", action="store_true")
+    redeploy.add_argument("--request-id", help="Reuse this ID to safely resume the same request", default=None)
+    redeploy.add_argument("--no-wait", action="store_true")
+    redeploy.add_argument("--url-only", action="store_true")
+    redeploy.add_argument("--timeout", type=int, default=900)
     deployments = commands.add_parser("deployments", aliases=["ls"], help="List releases in the current project")
     deployments.add_argument("--project", help="Project ID (defaults to the project from poteto login)")
     status = commands.add_parser("status", aliases=["inspect"], help="Inspect a deployment ID or Poteto URL")
@@ -288,9 +331,12 @@ def main(prog="poteto"):
         command.add_argument("deployment")
         command.add_argument("--project", help="Project ID (defaults to the directory link or login)")
     env = commands.add_parser("env")
+    env.add_argument("env_action", nargs="?", choices=["list", "ls", "set", "rm"], help="Omit for the legacy JSON replacement interface")
+    env.add_argument("name", nargs="?")
     env.add_argument("--project", help="Project ID (defaults to the directory link or login)")
-    env.add_argument("--target", choices=["production", "preview"], default="production")
-    env.add_argument("--file", type=Path, help="JSON object of environment variables; values never printed")
+    env.add_argument("--target", choices=["production", "preview"], help="New subcommands default to preview; legacy env defaults to production")
+    env.add_argument("--file", type=Path, help="Value file for env set, or a JSON object for legacy env replacement")
+    env.add_argument("--stdin", action="store_true", help="Read one variable value from stdin; never place secrets in arguments")
     for name in ['database','volume']:
         data=commands.add_parser(name)
         actions=data.add_subparsers(dest='data_action',required=True)
@@ -303,8 +349,21 @@ def main(prog="poteto"):
         delete.add_argument('--destroy-data',action='store_true',required=True,help='Explicitly destroy the stored data, after all bound releases are removed')
     args = parser.parse_args()
     args.command = {"ls": "deployments", "inspect": "status"}.get(args.command, args.command)
-    if args.command == "deploy" and args.no_wait and args.url_only:
+    if args.command in {"deploy", "redeploy"} and args.no_wait and args.url_only:
         parser.error("--url-only requires waiting for the release")
+    if args.command == "env":
+        args.target = args.target or ("preview" if args.env_action else "production")
+        if args.env_action in {"set", "rm"}:
+            if not args.name or not re.fullmatch(r"[A-Z_][A-Z0-9_]{0,63}", args.name):
+                parser.error("env set/rm requires a valid uppercase variable name")
+            if args.name.startswith("PAAS_") or args.name in {"PORT", "DATABASE_URL"}:
+                parser.error("Platform-managed variables cannot be changed")
+        elif args.name:
+            parser.error("A variable name is only used with env set/rm")
+        if args.stdin and (args.env_action != "set" or args.file):
+            parser.error("--stdin is only used with env set and cannot be combined with --file")
+        if args.env_action in {"list", "ls", "rm"} and args.file:
+            parser.error("--file is only used for env set or legacy env replacement")
     if args.command == "logs" and args.runtime and args.follow:
         parser.error("--follow is for build logs, not runtime snapshots")
     try:
@@ -433,7 +492,8 @@ def main(prog="poteto"):
                 config = deployment_config(args.directory, args.config)
                 source = pack(args.directory, token_file)
             else:
-                prepared = plan_deployment(args.directory, args.config, token_file, preview=args.preview, production=args.prod)
+                prepared = plan_deployment(args.directory, args.config, token_file, preview=args.preview,
+                                           production=args.prod, preset=args.preset)
                 config = prepared.config
                 source = pack(prepared.directory, files=prepared.files)
             if args.prod:
@@ -454,6 +514,18 @@ def main(prog="poteto"):
                 result = client.request("GET", "/v1/deployments/" + result["id"])
             if args.url_only:
                 print(result["production_url"] if config.get("target", "production") == "production" else result["url"])
+                return
+        elif args.command == "redeploy":
+            key = args.request_id or uuid.uuid4().hex
+            if not re.fullmatch(r"[a-zA-Z0-9_.-]{1,64}", key):
+                parser.error("--request-id must contain 1 to 64 letters, digits, dots, underscores or hyphens")
+            print("Redeploy request ID: " + key + " (reuse --request-id to resume)", file=sys.stderr)
+            result = client.request("POST", "/v1/deployments/" + args.deployment + "/redeploy",
+                                    {"target": "production" if args.prod else "preview"}, idempotency_key=key)
+            if not args.no_wait:
+                result = client.wait(result["id"], args.timeout)
+            if args.url_only:
+                print(result["production_url"] if args.prod else result["url"])
                 return
         elif args.command == "deployments":
             project_id = args.project
@@ -482,7 +554,13 @@ def main(prog="poteto"):
             result = client.request("POST", f"/v1/projects/{args.project}/{args.command}", {"deployment_id": args.deployment})
         elif args.command == "env":
             path=f"/v1/projects/{args.project}/env"+("?target=preview" if args.target=="preview" else "")
-            result = client.request("PUT", path, {"values": json.loads(args.file.read_text(encoding="utf-8-sig"))}) if args.file else client.request("GET", path)
+            if args.env_action == "set":
+                value = _environment_value(args)
+                result = client.request("PATCH", path, {"values": {args.name: value}})
+            elif args.env_action == "rm":
+                result = client.request("PATCH", path, {"remove": [args.name]})
+            else:
+                result = client.request("PUT", path, {"values": json.loads(args.file.read_text(encoding="utf-8-sig"))}) if args.file else client.request("GET", path)
         elif args.command in {'database','volume'}:
             if args.data_action=='create':
                 result=client.request('POST',f'/v1/projects/{args.project}/'+('databases' if args.command=='database' else 'volumes'),{'stage':args.stage})

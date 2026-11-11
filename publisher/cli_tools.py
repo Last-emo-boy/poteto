@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import tarfile
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 _PAGE = """<!doctype html>
 <html lang="en">
@@ -149,6 +149,14 @@ def _detect(root: Path, names: set[str]):
     scripts = package.get("scripts", {})
     if not isinstance(scripts, dict):
         raise PlanError("invalid_package", "package.json scripts must be an object.")
+    if any(isinstance(package.get(field), dict) and "next" in package[field]
+           for field in ("dependencies", "devDependencies")):
+        if scripts.get("build") and scripts.get("start"):
+            config = _preset("nextjs", package)
+            config.pop("memory_mb")  # Preserve the existing auto-detected Node resource default.
+            return config, "nextjs"
+        if not scripts.get("start"):
+            raise PlanError("missing_start_script", "Next.js needs a start script; for a static export, build first and deploy the out directory.")
     build = scripts.get("build")
     start = scripts.get("start")
     vite_config = any(name.startswith("vite.config.") and "/" not in name for name in names)
@@ -173,6 +181,23 @@ def _detect(root: Path, names: set[str]):
     raise PlanError("unrecognized_project", "No supported entry point found. Deploy a folder containing index.html, an npm project with a start script, or a Dockerfile; use poteto.json for other layouts.")
 
 
+def _preset(name, package):
+    if not isinstance(name, str) or name not in {"nextjs", "vite"}:
+        raise PlanError("invalid_preset", "preset must be nextjs or vite.")
+    scripts = package.get("scripts", {})
+    if not isinstance(scripts, dict) or not isinstance(scripts.get("build"), str) or not scripts["build"].strip():
+        raise PlanError("missing_build_script", f"The {name} preset requires an npm build script.")
+    if name == "vite":
+        return {"runtime": "static", "target": "preview", "build_command": "npm run build", "output_directory": "dist"}
+    if not isinstance(scripts.get("start"), str) or not scripts["start"].strip():
+        raise PlanError("missing_start_script", "The nextjs preset requires an npm start script. For a static export, build first and deploy the out directory.")
+    if not any(isinstance(package.get(field), dict) and "next" in package[field]
+               for field in ("dependencies", "devDependencies")):
+        raise PlanError("missing_next_dependency", "The nextjs preset requires Next.js in package.json.")
+    return {"runtime": "node", "target": "preview", "build_command": "npm run build",
+            "start_command": "npm start", "memory_mb": 512}
+
+
 def _relative_path(value, key):
     if (not isinstance(value, str) or not value or len(value) > 240 or value.startswith("/")
             or "\\" in value or ".." in value.split("/") or any(ord(c) < 32 for c in value)):
@@ -186,6 +211,7 @@ class DeploymentPlan:
     origin: str
     config: dict
     files: list[str]
+    preset: str | None = None
 
     def summary(self):
         runtime = self.config.get("runtime", "static")
@@ -200,11 +226,11 @@ class DeploymentPlan:
             "public_directory": self.config.get("output_directory", ".") if runtime == "static" else None,
             "dockerfile": self.config.get("dockerfile", "Dockerfile") if runtime == "dockerfile" else None,
             "upload_files": len(self.files),
-        }
+        } | ({"preset": self.preset} if self.preset else {})
 
 
 def plan_deployment(directory: Path, explicit: Path | None, credential_file: Path | None = None,
-                    *, preview: bool = False, production: bool = False):
+                    *, preview: bool = False, production: bool = False, preset: str | None = None):
     if preview and production:
         raise PlanError("invalid_target", "Choose either --preview or --prod")
     root = directory.resolve()
@@ -218,7 +244,20 @@ def plan_deployment(directory: Path, explicit: Path | None, credential_file: Pat
     if manifest is not None:
         config, origin = _read_object(manifest), manifest.name
     else:
-        config, origin = _detect(root, names)
+        config, origin = ({}, "preset") if preset else _detect(root, names)
+    configured_preset = config.pop("preset", None)
+    if configured_preset is not None and (not isinstance(configured_preset, str) or configured_preset not in {"nextjs", "vite"}):
+        raise PlanError("invalid_preset", "preset must be nextjs or vite.")
+    selected = preset or configured_preset
+    if selected:
+        if "package.json" not in names:
+            raise PlanError("missing_npm_input", "Framework presets require package.json in the upload directory.")
+        defaults = _preset(selected, _read_object(root / "package.json"))
+        if config.get("runtime", defaults["runtime"]) != defaults["runtime"]:
+            raise PlanError("invalid_runtime", f"The {selected} preset requires the {defaults['runtime']} runtime.")
+        config = defaults | config
+    elif origin == "nextjs":
+        selected = "nextjs"
     if preview:
         config["target"] = "preview"
     elif production:
@@ -243,4 +282,4 @@ def plan_deployment(directory: Path, explicit: Path | None, credential_file: Pat
         output = _relative_path(config.get("output_directory", "."), "output_directory")
         if not config.get("build_command") and (output / "index.html").as_posix() not in names:
             raise PlanError("missing_entrypoint", f"{output / 'index.html'} must be included in the upload. Build first or correct output_directory and the ignore rules.")
-    return DeploymentPlan(root, origin, config, files)
+    return DeploymentPlan(root, origin, config, files, selected)

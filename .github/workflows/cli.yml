@@ -33,7 +33,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           $env:PYTHONPATH = "tests/publisher"
-          python -m unittest test_cli_project.LocalLinkTests test_cli_portable
+          python -m unittest test_cli_project.LocalLinkTests test_cli_portable test_cli_presets
       - name: Build the standalone distribution
         run: python scripts/build-poteto-dist dist --url https://poteto.iflink.tech --api-url https://deploy.iflink.tech
       - name: Windows PowerShell installation

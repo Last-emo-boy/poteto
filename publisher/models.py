@@ -76,6 +76,29 @@ class EnvironmentInput(Input):
         return values
 
 
+class EnvironmentPatchInput(EnvironmentInput):
+    values: dict[str, str] = Field(default_factory=dict)
+    remove: list[str] = Field(default_factory=list, max_length=100)
+
+    @field_validator("remove")
+    @classmethod
+    def removed_keys(cls, keys):
+        EnvironmentInput.environment({key: "" for key in keys})
+        return keys
+
+    @model_validator(mode="after")
+    def distinct_operations(self):
+        if not self.values and not self.remove:
+            raise ValueError("Provide variables to set or remove")
+        if set(self.values) & set(self.remove):
+            raise ValueError("A variable cannot be set and removed in the same request")
+        return self
+
+
+class RedeployInput(Input):
+    target: Literal["preview", "production"] = "preview"
+
+
 class TokenInput(Input):
     name: str = Field(min_length=1, max_length=80)
     scopes: list[str]

@@ -9,7 +9,7 @@ description: 用 Poteto CLI 把现有应用目录预检并发布到 Poteto 的 H
 
 ## 安装与凭据
 
-如果没有可用的 Poteto 0.4.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
+如果没有可用的 Poteto 0.5.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
 
 ```sh
 curl -fsSL https://poteto.iflink.tech/install.sh | sh
@@ -43,3 +43,5 @@ poteto deploy "$APP_DIR" --project "$PROJECT_ID" --preview --url-only
 只在 `deploy` 成功且返回的 HTTPS 地址可访问后，才交付预览链接。验证首页或应用实际配置的健康检查路径；验证共享数据时优先使用只读请求。不要把 token 或环境变量值放进回复。
 
 后续用 `poteto inspect <预览 URL>` 查看同一个部署，用 `poteto logs <预览 URL>` 查看日志，用 `poteto ls` 列出当前项目发布。此技能始终使用 `--preview`；不得为了绕过预览权限改用 `--prod`。
+
+Next.js / Vite 项目可在预检和部署时同时加 `--preset nextjs` / `--preset vite`，或在 `poteto.json` 指定 `preset`。保留已有目录和锁文件。环境变量操作需 `env:write`，不要为预览 Agent 扩权；运行时变量变更后可用 `poteto redeploy <预览 URL> --preview --url-only` 重建。请求中断时沿用 stderr 中的 `--request-id`，不要重新生成请求。

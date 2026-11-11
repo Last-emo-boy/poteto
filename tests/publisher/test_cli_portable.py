@@ -20,7 +20,7 @@ from publisher import cli, cli_login
 class PortableClientTests(unittest.TestCase):
     def test_directory_link_upload_inspect_and_scope_error_over_real_http(self):
         project, release = "a"*24, "b"*24
-        state = {"archive": None, "config": None, "authorized": 0}
+        state = {"archive": None, "config": None, "authorized": 0, "environment": {}}
         token = "synthetic-native-client-token"
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -46,6 +46,8 @@ class PortableClientTests(unittest.TestCase):
                     self.respond(200,[self.deployment()] if state["archive"] else [])
                 elif self.path == "/v1/deployments/"+release:
                     self.respond(200,self.deployment())
+                elif self.path.startswith("/v1/projects/"+project+"/env"):
+                    self.respond(200,{"keys":sorted(state["environment"])})
                 else:
                     self.respond(404,{"error":"not found"})
             def do_POST(self):
@@ -54,12 +56,22 @@ class PortableClientTests(unittest.TestCase):
                 if body.get("target") == "production":
                     self.respond(403,{"error":"preview token"})
                     return
+                if self.path.endswith("/redeploy"):
+                    state["request_id"]=self.headers.get("Idempotency-Key")
+                    self.respond(202,self.deployment() | {"id":"c"*24})
+                    return
                 state["config"] = body
                 self.respond(201,self.deployment() | {"upload_url":"/v1/deployments/"+release+"/source"})
             def do_PUT(self):
                 if not self.authenticated(): return
                 state["archive"] = self.rfile.read(int(self.headers["Content-Length"]))
                 self.respond(202,{"state":"queued"})
+            def do_PATCH(self):
+                if not self.authenticated(): return
+                body=json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                state["environment"].update(body.get("values",{}))
+                for key in body.get("remove",[]):state["environment"].pop(key,None)
+                self.respond(200,{"keys":sorted(state["environment"]),"applies_to":"new deployments"})
         server = ThreadingHTTPServer(("127.0.0.1",0),Handler)
         thread = Thread(target=server.serve_forever,daemon=True)
         thread.start()
@@ -96,6 +108,17 @@ class PortableClientTests(unittest.TestCase):
                         self.assertEqual(["index.html","你好.html"],archive.getnames())
                     self.assertEqual(release,command("inspect","https://preview-"+release+".page.iflink.tech")["id"])
                     self.assertEqual(1,len(command("ls")))
+                    value_file=root/"runtime value.txt";value_file.write_text("private test value",encoding="utf-8")
+                    self.assertEqual(["EXAMPLE"],command("env","set","EXAMPLE","--file",value_file)["keys"])
+                    self.assertEqual("private test value",state["environment"]["EXAMPLE"])
+                    with patch("sys.stdin",io.StringIO("new value\r\n")):
+                        self.assertEqual(["EXAMPLE"],command("env","set","EXAMPLE","--stdin")["keys"])
+                    self.assertEqual("new value",state["environment"]["EXAMPLE"])
+                    self.assertEqual(["EXAMPLE"],command("env","list")["keys"])
+                    self.assertEqual([],command("env","rm","EXAMPLE")["keys"])
+                    cloned=command("redeploy",release,"--no-wait","--request-id","native-check")
+                    self.assertEqual("c"*24,cloned["id"])
+                    self.assertEqual("native-check",state["request_id"])
                     self.assertIn("HTTP 403",command("deploy",".","--prod","--no-wait",status=1))
                     self.assertTrue(command("unlink")["unlinked"])
             finally:

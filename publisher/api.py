@@ -13,7 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from publisher.archive import ArchiveError, unpack
 from publisher.config import Settings
 from publisher.http_limits import ControlLimits
-from publisher.models import DeploymentInput, EnvironmentInput, ProjectInput, ReleaseInput, TokenInput
+from publisher.models import DeploymentInput, EnvironmentInput, EnvironmentPatchInput, ProjectInput, ReleaseInput, TokenInput
 from publisher.store import PREVIEW_SCOPE, Problem, SCOPES, Store, encode, ident
 
 bearer = HTTPBearer(auto_error=False)
@@ -75,6 +75,9 @@ def create_app(settings=None):
                 "url": preview if row["state"] == "ready" else None,
                 "production_url": "https://" + settings.hostname(row["project_id"],domain=row["app_domain"]),
                 "upload_url": f"/v1/deployments/{row['id']}/source" if row["state"] == "uploading" else None}
+
+    from publisher.redeploy import register as register_redeploy
+    register_redeploy(app, store, actor, release_view)
 
     @app.get("/healthz", include_in_schema=False)
     def health():
@@ -182,6 +185,11 @@ def create_app(settings=None):
         with store.connection() as db:
             project = store.project(db, user, project_id, "env:write")
         return {"keys": sorted(store.environment(project,target))}
+
+    @app.patch("/v1/projects/{project_id}/env", tags=["Projects"])
+    def patch_environment(project_id: str, body: EnvironmentPatchInput,
+                          target: Literal["production", "preview"] = "production", user=Depends(actor)):
+        return store.patch_environment(user, project_id, body.values, body.remove, target)
 
     @app.post("/v1/projects/{project_id}/deployments", status_code=201, tags=["Deployments"])
     def create_deployment(project_id: str, body: DeploymentInput, request: Request, user=Depends(actor)):
