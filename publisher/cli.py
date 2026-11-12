@@ -395,7 +395,7 @@ def main(prog="poteto"):
         parser.error("Use --config and --preset with poteto build, not --prebuilt")
     if getattr(args, "prebuilt_image", None) and args.preset:
         parser.error("--prebuilt-image uses an existing image, not a framework preset")
-    if getattr(args, "from_image", None) and (args.config is not None or args.preset):
+    if getattr(args, "from_image", None) is not None and (args.config is not None or args.preset):
         parser.error("--from-image packages an existing image; pass runtime --config to plan or deploy")
     if args.command in {"deploy", "redeploy"} and args.no_wait and args.url_only:
         parser.error("--url-only requires waiting for the release")
@@ -424,7 +424,7 @@ def main(prog="poteto"):
         if args.command in {"build", "plan"}:
             token_file = os.environ.get("POTETO_TOKEN_FILE") or os.environ.get("PAAS_TOKEN_FILE") or default_token_file()
             if args.command == "build":
-                result = (package_image(args.directory, args.from_image, token_file) if args.from_image
+                result = (package_image(args.directory, args.from_image, token_file) if args.from_image is not None
                           else build_static(args.directory, args.config, token_file, preset=args.preset))
                 print(json.dumps(result, indent=2, ensure_ascii=False))
             else:

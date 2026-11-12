@@ -502,7 +502,8 @@ class Dokploy:
             status = client.start_build(deployment['id'], build | {'account_id': account_id, 'project_id': deployment['project_id']}, archive)
         if native_only and status.get('driver') != 'native':
             raise BackendError('Sandbox preview requires a trusted native build')
-        if config['runtime'] == 'image' and not (imported and imported['image_path'] is not None):
+        prebuilt = config['runtime'] == 'image' and not (imported and imported['image_path'] is not None)
+        if prebuilt:
             if status.get('driver') != 'prebuilt':
                 raise BackendError('Executor does not support the requested prebuilt image path')
             log('Importing prebuilt image: ' + deployment['id'])
@@ -529,6 +530,12 @@ class Dokploy:
             raise BackendError(status.get('error', 'Isolated build failed'))
         if static and (status.get('driver'), status.get('output_kind')) != ('vm', 'static'):
             raise BackendError('Isolated builder did not return static files')
+        if prebuilt:
+            size = status.get('image_bytes')
+            if (status.get('driver') != 'prebuilt' or status.get('image') != 'paas-release:' + deployment['id']
+                    or type(size) is not int or not 0 < size <= 202 * 1024**2):
+                raise BackendError('Invalid prebuilt image receipt')
+            self.store.reserve_built_artifact(deployment['id'], size, image=True)
         if check:
             check()
         return status

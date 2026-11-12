@@ -452,13 +452,14 @@ class Store:
         return db.execute("SELECT coalesce(sum(d.artifact_bytes+d.unpacked_bytes+d.built_bytes),0) FROM deployments d "
                           "JOIN projects p ON p.id=d.project_id WHERE p.account_id=?", (account_id,)).fetchone()[0]
 
-    def reserve_built_artifact(self, deployment_id, size):
+    def reserve_built_artifact(self, deployment_id, size, *, image=False):
         with self.connection() as db:
-            row = db.execute("SELECT p.account_id,a.max_storage,d.built_bytes FROM deployments d "
+            row = db.execute("SELECT p.account_id,a.max_storage,d.built_bytes,d.runtime_driver,d.config FROM deployments d "
                              "JOIN projects p ON p.id=d.project_id JOIN accounts a ON a.id=p.account_id "
-                             "WHERE d.id=? AND d.runtime_driver=?", (deployment_id, ARTIFACT_DRIVER)).fetchone()
-            if row is None:
-                raise Problem(409, "Static release no longer owns this build")
+                             "WHERE d.id=?", (deployment_id,)).fetchone()
+            if row is None or not (json.loads(row['config'])['runtime'] == 'image' if image else
+                                   row['runtime_driver'] == ARTIFACT_DRIVER):
+                raise Problem(409, "Release no longer owns this artifact")
             if self.storage_used(db, row['account_id']) - row['built_bytes'] + size > row['max_storage']:
                 raise Problem(429, "Built files exceed the account artifact storage quota")
             db.execute("UPDATE deployments SET built_bytes=? WHERE id=?", (size, deployment_id))

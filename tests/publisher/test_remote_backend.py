@@ -51,6 +51,30 @@ class RemoteBackendTests(unittest.TestCase):
         self.assertEqual(['CMD','/paas-healthcheck','http://127.0.0.1:3000/healthz'],app['healthcheck']['test'])
         self.assertEqual('server',self.backend.target(self.release['id'])['server_id'])
 
+    def test_prebuilt_receipt_reserves_storage_before_loading_into_the_tenant(self):
+        config = json.loads(self.release['config']) | {'runtime': 'image'}
+        self.release['config'] = json.dumps(config)
+        with self.store.connection() as db:
+            db.execute("UPDATE deployments SET config=? WHERE id=?", (self.release['config'], self.release['id']))
+        registry = Mock()
+        registry.ensure.return_value = {'server_id': 'server', 'http_port': 22200}
+        client = Mock()
+        client.build_status.return_value = {'driver': 'prebuilt', 'state': 'succeeded',
+                                            'image': 'paas-release:' + self.release['id'], 'image_bytes': 1024}
+        client.build_logs.return_value = 'No build VM'
+        def load(account, release):
+            self.assertEqual((self.account, self.release['id']), (account, release))
+            with self.store.connection() as db:
+                self.assertEqual(1024, db.execute("SELECT built_bytes FROM deployments WHERE id=?", (release,)).fetchone()[0])
+        client.load_image.side_effect = load
+        with patch('publisher.runtime.RuntimeRegistry', return_value=registry), \
+             patch.object(self.backend, 'execution_client', return_value=client):
+            definition = self.backend.prepare_remote(self.release, self.root / 'source.tar.gz', lambda _: None)
+        client.start_build.assert_not_called()
+        client.load_image.assert_called_once()
+        self.assertEqual('10001:10001', definition['services']['app']['user'])
+        self.assertEqual('never', definition['services']['app']['pull_policy'])
+
     def test_observation_failure_never_resubmits_an_unknown_job(self):
         registry=Mock();registry.ensure.return_value={'server_id':'server','http_port':22200}
         client=Mock();client.build_status.side_effect=TimeoutError('observation lost')

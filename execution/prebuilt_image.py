@@ -1,6 +1,7 @@
 """Normalize a single Docker-exported image before loading it into a tenant VM."""
 import gzip
 import hashlib
+import io
 import json
 from pathlib import Path
 import re
@@ -63,10 +64,57 @@ def inspect(root):
 
 
 def add_bytes(archive, name, data):
-    import io
     info = tarfile.TarInfo(name)
     info.size = len(data)
     archive.addfile(info, io.BytesIO(data))
+
+
+class LayerReader:
+    """Expose only bounded metadata reads to tarfile; never extract a layer."""
+    def __init__(self, stream, size):
+        self.stream = stream
+        self.size = size
+
+    def tell(self):
+        return self.stream.tell()
+
+    def seek(self, offset, whence=0):
+        if whence != 0 or not 0 <= offset <= self.size:
+            raise ImageError("Invalid image layer offset")
+        return self.stream.seek(offset)
+
+    def read(self, size):
+        if not 0 <= size <= METADATA_LIMIT:
+            raise ImageError("Image layer metadata exceeds 1 MiB")
+        return self.stream.read(size)
+
+
+def validate_layer(staged, size):
+    staged.seek(0)
+    prefix = staged.read(6)
+    if (prefix.startswith((b"BZh", b"\x1f\x8b", b"\xfd7zXZ\x00", b"\x28\xb5\x2f\xfd"))
+            or (len(prefix) >= 4 and int.from_bytes(prefix[:4], "little") & 0xfffffff0 == 0x184d2a50)):
+        raise ImageError("Nested or unsupported image layer compression")
+    staged.seek(0)
+    try:
+        with tarfile.open(fileobj=LayerReader(staged, size), mode="r:") as layer:
+            logical_bytes = 0
+            while entry := layer.next():
+                if entry.sparse is not None or entry.size < 0:
+                    raise ImageError("Sparse or invalid image layer file")
+                logical_bytes += entry.size
+                if logical_bytes > size:
+                    raise ImageError("Image layer expands beyond its admitted size")
+                layer.members.clear()
+            staged.seek(layer.offset)
+            while trailing := staged.read(1024**2):
+                if trailing.strip(b"\0"):
+                    raise ImageError("Unexpected bytes after image layer tar")
+    except ImageError:
+        raise
+    except (tarfile.TarError, RecursionError, ValueError) as error:
+        raise ImageError("Invalid uncompressed image layer tar") from error
+    staged.seek(0)
 
 
 def add_layer(archive, name, path, expected, limit, *, scratch):
@@ -86,9 +134,9 @@ def add_layer(archive, name, path, expected, limit, *, scratch):
                 staged.write(chunk)
             if "sha256:" + digest.hexdigest() != expected:
                 raise ImageError("Image layer does not match its configuration digest")
+            validate_layer(staged, size)
             info = tarfile.TarInfo(name)
             info.size = size
-            staged.seek(0)
             archive.addfile(info, staged)
     return size
 

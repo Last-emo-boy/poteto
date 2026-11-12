@@ -114,6 +114,8 @@ def read_prebuilt(directory: Path, *, production=False):
 
 def package_image(directory: Path, reference: str, credential_file: Path | str):
     """Save one local Docker image; never build, pull or push on the user's behalf."""
+    if not reference.strip():
+        raise PlanError("missing_image_reference", "Provide a local Docker image name or ID.")
     root = directory.resolve()
     artifact = _artifact(root, "image.tar.gz")
     if artifact == Path(credential_file).expanduser().resolve():
@@ -162,7 +164,10 @@ def read_image(directory: Path, artifact: Path, config: Path | None, credential_
     stats = _inspect(data, entrypoint="manifest.json")
     if config is not None and not config.is_file():
         raise PlanError("missing_config", f"Deployment config does not exist: {config}")
-    config = deployment_config(root, config)
+    try:
+        config = deployment_config(root, config)
+    except ValueError:
+        raise PlanError("invalid_json", "Deployment config must contain a valid JSON object.") from None
     if not isinstance(config, dict):
         raise PlanError("invalid_json", "Deployment config must contain a JSON object.")
     runtime_fields = ("port", "health_check", "sleep", "memory_mb", "cpus", "database_id", "volume_id", "migration_command")
