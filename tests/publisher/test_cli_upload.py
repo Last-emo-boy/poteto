@@ -160,3 +160,49 @@ class UploadCliTests(unittest.TestCase):
         self.assertFalse(cli_upload.retryable(ssl.SSLCertVerificationError('untrusted')))
         self.assertFalse(cli_upload.retryable(cli_upload.RequestError(403, 'forbidden')))
         self.assertTrue(cli_upload.retryable(cli_upload.RequestError(502, 'upstream')))
+
+
+class ImportTransferTests(unittest.TestCase):
+    def status(self, received=0, **changes):
+        return {'id':'a'*24,'bundle_id':'b'*24,'project_id':'c'*24,'target':'preview',
+                'size':8,'received':received,'chunk_limit':4,'state':'uploading'} | changes
+
+    def transfer(self, client):
+        from unittest.mock import patch
+        with patch.object(cli_upload.time,'sleep'):
+            cli_upload.transfer_import(client,'/v1/imports/'+'a'*24,io.BytesIO(b'abcdefgh'),self.status())
+
+    def test_part_reply_loss_reconciles_offset_without_duplicate_upload(self):
+        import http.client
+        client=Mock();client.request.side_effect=[http.client.RemoteDisconnected('lost'),self.status(4),self.status(8)]
+        self.transfer(client)
+        self.assertEqual(['PUT','GET','PUT'],[c.args[0] for c in client.request.call_args_list])
+        self.assertEqual(b'efgh',client.request.call_args_list[-1].args[2])
+
+    def test_uncommitted_part_is_retried_at_its_original_offset(self):
+        import http.client
+        client=Mock();client.request.side_effect=[http.client.RemoteDisconnected('lost'),self.status(),self.status(4),self.status(8)]
+        self.transfer(client)
+        calls=client.request.call_args_list
+        self.assertEqual(calls[0].args,calls[2].args)
+        self.assertEqual(b'abcd',calls[2].args[2])
+
+    def test_permissions_and_certificate_errors_are_not_retried(self):
+        for error in (cli_upload.RequestError(403,'denied'),ssl.SSLCertVerificationError('untrusted')):
+            client=Mock();client.request.side_effect=error
+            with self.assertRaises(type(error)):self.transfer(client)
+            self.assertEqual(1,client.request.call_count)
+
+    def test_retry_budget_is_bounded(self):
+        import http.client
+        client=Mock();client.request.side_effect=[http.client.RemoteDisconnected('lost'),self.status(),
+            http.client.RemoteDisconnected('lost'),self.status(),http.client.RemoteDisconnected('lost')]
+        with self.assertRaises(http.client.RemoteDisconnected):self.transfer(client)
+        self.assertEqual(3,len([c for c in client.request.call_args_list if c.args[0]=='PUT']))
+
+    def test_changed_identity_and_unexpected_offsets_stop_recovery(self):
+        import http.client
+        for current in (self.status(bundle_id='d'*24),self.status(project_id='d'*24),self.status(2),self.status(9)):
+            client=Mock();client.request.side_effect=[http.client.RemoteDisconnected('lost'),current]
+            with self.assertRaises(RuntimeError):self.transfer(client)
+            self.assertEqual(2,client.request.call_count)

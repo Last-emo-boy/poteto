@@ -87,6 +87,48 @@ def retryable(error):
     return isinstance(error, (OSError, http.client.HTTPException))
 
 
+def transfer_import(client, path, source, status):
+    identity = {key: status[key] for key in ('id', 'bundle_id', 'size', 'project_id', 'target') if key in status}
+    size, offset = status['size'], status['received']
+    limit = status['chunk_limit']
+    if type(limit) is not int or not 1 <= limit <= 8 * 1024**2:
+        raise RuntimeError('Invalid import part limit returned by server')
+
+    def checked(current):
+        if any(current.get(key) != value for key, value in identity.items()):
+            raise RuntimeError('Import status belongs to a different bundle or project')
+        received = current.get('received')
+        if type(received) is not int or not 0 <= received <= size or current.get('state') != 'uploading':
+            raise RuntimeError('Invalid import upload status returned by server')
+        return current
+
+    checked(status)
+    source.seek(offset)
+    while offset < size:
+        end = min(offset + limit, size)
+        chunk = source.read(end - offset)
+        if len(chunk) != end - offset:
+            raise RuntimeError('Authenticated bundle ended early')
+        for attempt in range(3):
+            try:
+                current = checked(client.request('PUT', path + '/part?offset=' + str(offset),
+                                                 chunk, raw='application/octet-stream'))
+                if current['received'] != end:
+                    raise RuntimeError('Import did not commit the expected offset')
+                break
+            except (RuntimeError, OSError, http.client.HTTPException) as error:
+                if not retryable(error) or attempt == 2:
+                    raise
+                time.sleep(1)
+                current = checked(client.request('GET', path))
+                if current['received'] == end:
+                    break
+                if current['received'] != offset:
+                    raise RuntimeError('Import offset changed unexpectedly') from None
+        offset = end
+        print(f'Uploaded import {offset / 1024**2:.1f} / {size / 1024**2:.1f} MiB', file=sys.stderr, flush=True)
+
+
 def transfer(client, release, source):
     base = "/v1/deployments/" + release + "/source-upload"
     identity = {"size": len(source), "sha256": hashlib.sha256(source).hexdigest()}

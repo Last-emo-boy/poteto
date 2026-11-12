@@ -187,14 +187,8 @@ class Client:
             if status['bundle_id']!=bundle_id or status['size']!=size:raise RuntimeError('This bundle does not match the resumable import')
             if status['state']=='uploading':
                 print('Import operation '+operation,file=sys.stderr)
-                offset=status['received'];plain.seek(offset)
                 try:
-                    while offset<size:
-                        length=min(CHUNK,size-offset);chunk=plain.read(length)
-                        if len(chunk)!=length:raise RuntimeError('Authenticated bundle ended early')
-                        next_status=self.request('PUT',path+'/part?offset='+str(offset),chunk,raw='application/octet-stream')
-                        if next_status['received']!=offset+length:raise RuntimeError('Import did not commit the expected offset')
-                        offset+=length
+                    cli_upload.transfer_import(self,path,plain,status)
                     status=self.request('POST',path+'/submit')
                 except (RuntimeError,OSError) as error:
                     raise RuntimeError('Import '+operation+' interrupted; use import resume with the same bundle: '+str(error)) from None

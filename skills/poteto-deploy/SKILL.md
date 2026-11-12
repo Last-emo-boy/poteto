@@ -9,7 +9,7 @@ description: 用 Poteto CLI 把现有应用目录预检并发布到 Poteto 的 H
 
 ## 安装与凭据
 
-如果没有可用的 Poteto 0.16.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
+如果没有可用的 Poteto 0.16.1 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
 
 ```sh
 curl -fsSL https://poteto.iflink.tech/install.sh | sh
@@ -97,6 +97,8 @@ poteto export create "$PROJECT_ID" --deployment "$PREVIEW_ID" --recipient "$AGE_
 poteto export download "$EXPORT_ID" --output /secure/preview.zip.age
 poteto import create "$EMPTY_PROJECT_ID" /secure/preview.zip.age --identity /secure/age-key.txt --preview
 ```
+
+分片传输遇到短暂断线会先核对服务端已提交偏移再有限重试；仍失败时按错误中的 ID 执行 `import resume`，沿用同一加密包和身份文件，不重新创建导入。
 
 接收方必须是已授权的空个人预览项目。身份私钥和加密包放在上传目录之外；不要输出私钥、环境值或数据库内容。导入会创建新数据库绑定，保留原数据并跳过已应用迁移。访问导入后的页面验证实际数据，同时确认源应用未改变；不能只凭任务完成就宣称恢复成功。
 
