@@ -20,7 +20,7 @@ if __package__:
     from .cli_login import default_token_file, login, logout
     from .cli_tools import VERSION, PlanError, deployment_config, initialize, pack, plan_deployment
     from .cli_project import deployment_reference, find_link, unlink, write_link
-    from .cli_prebuilt import build_static, package_image, read_image, read_prebuilt
+    from .cli_prebuilt import build_local, package_image, read_image, read_prebuilt
     from .image_contract import UPLOAD_LIMIT as IMAGE_UPLOAD_LIMIT
     from .login_contract import DEFAULT_URL, LOGIN_PATH
     from .transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
@@ -298,10 +298,10 @@ def main(prog="poteto"):
         link.add_argument("--project", help="Project ID (defaults to the project from poteto login)")
         unlink_command = commands.add_parser("unlink", help="Remove only this directory's local project link")
         unlink_command.add_argument("directory", type=Path, nargs="?", default=Path("."))
-        build = commands.add_parser("build", help="Build a trusted static project locally; do not upload")
+        build = commands.add_parser("build", help="Build a trusted static site or Linux image on this client; do not upload")
         build.add_argument("directory", type=Path, nargs="?", default=Path("."))
         build.add_argument("--config", type=Path, help="Build configuration JSON")
-        build.add_argument("--preset", choices=["vite"])
+        build.add_argument("--preset", choices=["nextjs", "vite"])
         build.add_argument("--from-image", help="Package a local linux/amd64 Docker image without rebuilding")
         plan = commands.add_parser("plan", help="Inspect a deployment locally without logging in or uploading")
         plan.add_argument("directory", type=Path, nargs="?", default=Path("."))
@@ -359,6 +359,7 @@ def main(prog="poteto"):
     if prog != "paas":
         deploy.add_argument("--preset", choices=["nextjs", "vite"])
         artifact = deploy.add_mutually_exclusive_group()
+        artifact.add_argument("--local-build", action="store_true", help="Build on this client, preflight and upload only the result")
         artifact.add_argument("--prebuilt", action="store_true", help="Upload only the static artifact from poteto build")
         artifact.add_argument("--prebuilt-image", type=Path, metavar="ARCHIVE", help="Publish a packaged Docker image without building")
     target = deploy.add_mutually_exclusive_group()
@@ -445,7 +446,7 @@ def main(prog="poteto"):
             token_file = os.environ.get("POTETO_TOKEN_FILE") or os.environ.get("PAAS_TOKEN_FILE") or default_token_file()
             if args.command == "build":
                 result = (package_image(args.directory, args.from_image, token_file) if args.from_image is not None
-                          else build_static(args.directory, args.config, token_file, preset=args.preset))
+                          else build_local(args.directory, args.config, token_file, preset=args.preset)[0])
                 print(json.dumps(result, indent=2, ensure_ascii=False))
             else:
                 _show_plan(args, token_file)
@@ -568,6 +569,14 @@ def main(prog="poteto"):
                     raise RuntimeError("Deployment directory does not exist")
                 config = deployment_config(args.directory, args.config)
                 source = pack(args.directory, token_file)
+            elif args.local_build:
+                report, source = build_local(args.directory, args.config, token_file or default_token_file(),
+                                             preset=args.preset, production=args.prod)
+                config = report.get("configuration", {"runtime": "static", "target": report["target"]})
+                client.request("POST", f"/v1/projects/{project_id}/preflight", {
+                    "configuration": config, "archive_bytes": len(source),
+                    "unpacked_bytes": report["unpacked_bytes"], "files": report["upload_files"],
+                })
             elif args.prebuilt_image:
                 report, source = read_image(args.directory, args.prebuilt_image, args.config,
                                             token_file or default_token_file(), production=args.prod)

@@ -1,4 +1,4 @@
-"""Build and publish a portable static artifact without sending source."""
+"""Build portable static artifacts and Linux images on the publishing client."""
 import gzip
 import io
 import os
@@ -7,9 +7,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import uuid
 
 from .archive import ArchiveError, unpack
 from . import image_contract
+from .build_recipe import dockerfile
 from .cli_project import local_directory
 from .cli_tools import PlanError, deployment_config, pack, plan_deployment, upload_files
 
@@ -42,13 +44,16 @@ def _inspect(source, *, image=False):
         raise PlanError("invalid_artifact", str(error)) from None
 
 
+def _build_environment():
+    return {key: value for key, value in os.environ.items()
+            if key.upper() not in {"POTETO_TOKEN", "POTETO_TOKEN_FILE", "PAAS_TOKEN", "PAAS_TOKEN_FILE"}}
+
+
 def _run_build(directory, command):
     if not shutil.which("npm"):
         raise PlanError("missing_npm", "Install Node.js and npm before running poteto build.")
-    env = {key: value for key, value in os.environ.items()
-           if key.upper() not in {"POTETO_TOKEN", "POTETO_TOKEN_FILE", "PAAS_TOKEN", "PAAS_TOKEN_FILE"}}
     for step, script in (("Install", "npm ci --include=dev"), ("Build", command)):
-        result = subprocess.run(script, shell=True, cwd=directory, env=env, stdin=subprocess.DEVNULL,
+        result = subprocess.run(script, shell=True, cwd=directory, env=_build_environment(), stdin=subprocess.DEVNULL,
                                 stdout=sys.stderr)
         if result.returncode:
             raise PlanError("local_build_failed", f"{step} exited with status {result.returncode}; see build output above.")
@@ -99,6 +104,51 @@ def build_static(directory: Path, config: Path | None, credential_file: Path | s
             "upload_bytes": len(source)}
 
 
+def build_local(directory: Path, config: Path | None, credential_file: Path | str, *, preset=None, production=False):
+    """Build on this client, returning a publishable report and archive; never call the platform."""
+    plan = plan_deployment(directory, config, credential_file, preset=preset)
+    if plan.config.get("runtime", "static") == "static":
+        print("Building static output on this client; no server build.", file=sys.stderr)
+        build_static(directory, config, credential_file, preset=preset)
+        return read_prebuilt(directory, production=production)
+    artifact = _artifact(plan.directory, "image.tar.gz")
+    if artifact == Path(credential_file).expanduser().resolve():
+        raise PlanError("invalid_artifact", "The output file cannot also be the credential file.")
+    artifact.unlink(missing_ok=True)
+    if not shutil.which("docker"):
+        raise PlanError("missing_docker", "Install and start Docker with Buildx to build a Linux image on this client.")
+    print("Building linux/amd64 using your Docker context; no Poteto server build.", file=sys.stderr)
+    reference = "poteto-local:" + uuid.uuid4().hex
+    with tempfile.TemporaryDirectory(prefix="poteto-build-") as temporary:
+        work = Path(temporary)
+        source = work / "source"
+        source.mkdir()
+        try:
+            unpack(io.BytesIO(pack(plan.directory, files=plan.files)), source,
+                   max_bytes=UNPACK_LIMIT, max_files=FILE_LIMIT)
+        except ArchiveError as error:
+            raise PlanError("invalid_source", str(error)) from None
+        if plan.config["runtime"] == "dockerfile":
+            recipe = source / plan.config.get("dockerfile", "Dockerfile")
+        else:
+            recipe = work / "Dockerfile"
+            recipe.write_text(dockerfile(plan.config), encoding="utf-8")
+        result = subprocess.run(["docker", "buildx", "build", "--platform", "linux/amd64", "--load",
+                                 "--progress", "plain", "--tag", reference, "--file", str(recipe), str(source)],
+                                env=_build_environment(), stdin=subprocess.DEVNULL, stdout=sys.stderr)
+        if result.returncode:
+            raise PlanError("local_build_failed", "Docker build failed; no deployment was created. See build output above.")
+        try:
+            package_image(plan.directory, reference, credential_file)
+        finally:
+            removed = subprocess.run(["docker", "image", "rm", "--no-prune", "--", reference],
+                                     env=_build_environment(), stdin=subprocess.DEVNULL, capture_output=True)
+            if removed.returncode:
+                print("Could not remove temporary local image tag: " + reference, file=sys.stderr)
+    return read_image(plan.directory, artifact, None, credential_file,
+                      production=production, configuration=plan.config)
+
+
 def read_prebuilt(directory: Path, *, production=False):
     root = directory.resolve()
     artifact = _artifact(root)
@@ -131,7 +181,7 @@ def package_image(directory: Path, reference: str, credential_file: Path | str):
     pending = Path(out.name)
     try:
         with out, subprocess.Popen(["docker", "image", "save", "--platform", "linux/amd64", "--", reference],
-                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE) as process:
+                                   env=_build_environment(), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE) as process:
             try:
                 size = 0
                 with gzip.GzipFile(filename="", mode="wb", fileobj=out, compresslevel=3, mtime=0) as compressed:
@@ -154,7 +204,8 @@ def package_image(directory: Path, reference: str, credential_file: Path | str):
     return {"ok": True, "runtime": "image", "artifact": str(artifact), "upload_bytes": len(data)}
 
 
-def read_image(directory: Path, artifact: Path, config: Path | None, credential_file: Path | str, *, production=False):
+def read_image(directory: Path, artifact: Path, config: Path | None, credential_file: Path | str, *, production=False,
+               configuration=None):
     root = directory.resolve()
     if not root.is_dir():
         raise PlanError("missing_directory", "Deployment directory does not exist.")
@@ -168,7 +219,7 @@ def read_image(directory: Path, artifact: Path, config: Path | None, credential_
     if config is not None and not config.is_file():
         raise PlanError("missing_config", f"Deployment config does not exist: {config}")
     try:
-        config = deployment_config(root, config)
+        config = deployment_config(root, config) if configuration is None else configuration
     except ValueError:
         raise PlanError("invalid_json", "Deployment config must contain a valid JSON object.") from None
     if not isinstance(config, dict):

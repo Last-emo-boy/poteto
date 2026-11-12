@@ -34,11 +34,14 @@ jobs:
       - name: Real Linux prebuilt image intake
         if: runner.os == 'Linux'
         run: sh tests/linux/test-prebuilt-image.sh
+      - name: Real local Node build and runtime
+        if: runner.os == 'Linux'
+        run: sh tests/linux/test-local-node.sh
       - name: Windows project and browser callback tests
         if: runner.os == 'Windows'
         run: |
           $env:PYTHONPATH = "tests/publisher"
-          python -m unittest test_cli_project.LocalLinkTests test_cli_portable test_cli_presets test_cli_prebuilt
+          python -m unittest test_cli_project.LocalLinkTests test_cli_portable test_cli_presets test_cli_prebuilt test_cli_local_build
       - name: Build the standalone distribution
         run: python scripts/build-poteto-dist dist --url https://poteto.iflink.tech --api-url https://deploy.iflink.tech
       - name: Windows PowerShell installation

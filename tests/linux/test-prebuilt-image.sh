@@ -33,8 +33,17 @@ COPY server /server
 USER 10001:10001
 ENTRYPOINT ["/server"]
 DOCKERFILE
-docker buildx build --platform linux/amd64 --load -t "$source" "$root"
-poteto build "$root" --from-image "$source"
+poteto build "$root"
+source=$(python - "$root/.poteto/image.tar.gz" <<'PY'
+import json,sys,tarfile
+with tarfile.open(sys.argv[1]) as image:
+    print(json.load(image.extractfile('manifest.json'))[0]['RepoTags'][0])
+PY
+)
+if docker image inspect "$source" >/dev/null 2>&1; then
+    echo 'Temporary local build tag was not removed' >&2
+    exit 1
+fi
 poteto plan "$root" --prebuilt-image "$root/.poteto/image.tar.gz" --json
 python - "$root" "$release" <<'PY'
 from pathlib import Path
@@ -44,7 +53,6 @@ from execution.prebuilt_image import normalize
 root = Path(sys.argv[1])
 print(normalize(root / ".poteto/image.tar.gz", root / "normalized.tar", sys.argv[2]))
 PY
-docker image rm "$source" >/dev/null
 docker image load --input "$root/normalized.tar"
 if docker image inspect "$source" >/dev/null 2>&1; then
     echo 'Original tag leaked from the uploaded image archive' >&2

@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from publisher.cli_tools import VERSION
 
-MODULES = ("__init__.py", "cli.py", "cli_login.py", "cli_tools.py", "cli_project.py", "login_contract.py", "transfer_wire.py", "archive.py", "cli_prebuilt.py", "image_contract.py")
+MODULES = ("__init__.py", "cli.py", "cli_login.py", "cli_tools.py", "cli_project.py", "login_contract.py", "transfer_wire.py", "archive.py", "cli_prebuilt.py", "image_contract.py", "build_recipe.py")
 SKILL = Path("skills/poteto-deploy/SKILL.md")
 
 
@@ -76,7 +76,7 @@ p{{color:#466052}}pre{{padding:18px;background:#132e24;color:#e2f4c1;border-radi
 <h1>从终端发布。</h1><p>Windows、macOS 或 Linux，需 Python 3.10+。无需管理员权限。</p>
 <p>macOS / Linux</p><pre><code>{command}</code></pre>
 <p>Windows · PowerShell 7+</p><pre><code>{powershell}</code></pre>
-<p>运行 <code>poteto login</code>，用 <code>poteto plan .</code> 预检，再用 <code>poteto deploy . --preview</code> 发布。</p>
+<p>运行 <code>poteto login</code>，用 <code>poteto plan .</code> 预检，再用 <code>poteto deploy . --local-build --preview</code> 本地构建并发布。动态应用需要 Docker 和项目镜像权限。</p>
 <a href="/install.sh">Shell 脚本</a> · <a href="/install.ps1">PowerShell 脚本</a> · <a href="/poteto-{VERSION}.pyz">下载 CLI</a> · <a href="/{SKILL.as_posix()}">Agent Skill</a>
 </main></html>""", encoding="utf-8")
     print(args.output.resolve())

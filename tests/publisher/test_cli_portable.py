@@ -45,7 +45,7 @@ class PortableClientTests(unittest.TestCase):
 
     def test_directory_link_upload_inspect_and_scope_error_over_real_http(self):
         project, release = "a"*24, "b"*24
-        state = {"archive": None, "config": None, "authorized": 0, "environment": {}}
+        state = {"archive": None, "config": None, "authorized": 0, "environment": {}, "creates": 0, "deny_preflight": False}
         token = "synthetic-native-client-token"
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *args):
@@ -79,6 +79,10 @@ class PortableClientTests(unittest.TestCase):
                 if not self.authenticated(): return
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
                 if self.path.endswith("/preflight"):
+                    if state["deny_preflight"]:
+                        self.respond(429,{"error":"preview capacity reached"})
+                        return
+                    state["preflight"] = body
                     self.respond(200,{"ok":True,"target":body["configuration"]["target"]})
                     return
                 if body.get("target") == "production":
@@ -88,6 +92,7 @@ class PortableClientTests(unittest.TestCase):
                     state["request_id"]=self.headers.get("Idempotency-Key")
                     self.respond(202,self.deployment() | {"id":"c"*24})
                     return
+                state["creates"] += 1
                 state["config"] = body
                 self.respond(201,self.deployment() | {"upload_url":"/v1/deployments/"+release+"/source"})
             def do_PUT(self):
@@ -139,6 +144,16 @@ class PortableClientTests(unittest.TestCase):
                         self.assertEqual(["index.html","你好.html"],archive.getnames())
                     self.assertEqual(release,command("inspect","https://preview-"+release+".page.iflink.tech")["id"])
                     self.assertEqual(1,len(command("ls")))
+                    self.assertIn("Run poteto build",command("deploy",".","--prebuilt","--no-wait",status=1))
+                    command("deploy", ".", "--local-build", "--preview", "--no-wait")
+                    self.assertEqual({"runtime":"static","target":"preview"}, state["config"])
+                    self.assertEqual(state["config"], state["preflight"]["configuration"])
+                    self.assertEqual(len(state["archive"]), state["preflight"]["archive_bytes"])
+                    creates = state["creates"]
+                    state["deny_preflight"] = True
+                    self.assertIn("preview capacity reached", command("deploy", ".", "--local-build", "--no-wait", status=1))
+                    self.assertEqual(creates, state["creates"])
+                    state["deny_preflight"] = False
                     value_file=root/"runtime value.txt";value_file.write_text("private test value",encoding="utf-8")
                     self.assertEqual(["EXAMPLE"],command("env","set","EXAMPLE","--file",value_file)["keys"])
                     self.assertEqual("private test value",state["environment"]["EXAMPLE"])
@@ -152,7 +167,6 @@ class PortableClientTests(unittest.TestCase):
                     self.assertEqual("native-check",state["request_id"])
                     self.assertIn("HTTP 403",command("deploy",".","--prod","--no-wait",status=1))
                     previous_requests = state["authorized"]
-                    self.assertIn("Run poteto build",command("deploy",".","--prebuilt","--no-wait",status=1))
                     snapshot = Path(command("build",".")["artifact"]).read_bytes()
                     (directory/"index.html").write_text("changed source",encoding="utf-8")
                     (directory/"poteto.json").write_text('{"runtime":"node","target":"production"}',encoding="utf-8")

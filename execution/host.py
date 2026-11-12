@@ -485,6 +485,7 @@ def provision_builder(alias, job, spec):
         "execution/guest_build.py": "opt/paas-execution/guest_build.py",
         "execution/build_source.py": "opt/paas-execution/build_source.py",
         "publisher/archive.py": "opt/paas-execution/publisher/archive.py",
+        "publisher/build_recipe.py": "opt/paas-execution/publisher/build_recipe.py",
         "publisher/__init__.py": "opt/paas-execution/publisher/__init__.py",
     }
     # The source remains an opaque inner archive. Only fixed platform-owned

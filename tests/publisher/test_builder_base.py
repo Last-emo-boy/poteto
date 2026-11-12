@@ -59,6 +59,7 @@ class PreparedBuilderTests(unittest.TestCase):
                 self.assertEqual(sorted([
                     "opt/paas-execution/guest_build.py", "opt/paas-execution/build_source.py",
                     "opt/paas-execution/publisher/archive.py", "opt/paas-execution/publisher/__init__.py",
+                    "opt/paas-execution/publisher/build_recipe.py",
                     "work/spec.json", "work/source.tar.gz",
                 ]), sorted(bundle.getnames()))
                 self.assertEqual(source.read_bytes(), bundle.extractfile("work/source.tar.gz").read())
