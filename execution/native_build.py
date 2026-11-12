@@ -35,8 +35,11 @@ def docker(root):
 
 def validate_builder(root, project):
     command, env = docker(root)
-    info = subprocess.run(command + ['buildx', 'inspect', builder_name(project)], env=env, check=True,
-                          stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15).stdout
+    try:
+        info = subprocess.run(command + ['buildx', 'inspect', builder_name(project)], env=env, check=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15).stdout
+    except (FileNotFoundError, subprocess.CalledProcessError) as error:
+        raise ValueError('Native builder is unavailable; provision the dedicated local Buildx builder') from error
     endpoints = re.findall(r'^Endpoint:[ \t]+(\S+)', info, re.MULTILINE)
     if not re.search(r'^Driver:[ \t]+docker-container[ \t]*$', info, re.MULTILINE) or endpoints != ['unix:///var/run/docker.sock']:
         raise ValueError('Native build requires one dedicated local docker-container BuildKit node')

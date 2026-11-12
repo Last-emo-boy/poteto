@@ -100,6 +100,18 @@ class NativeBuildTests(unittest.TestCase):
             finish.assert_called_once_with(self.root, self.job, PROJECT)
             vm.assert_not_called()
 
+    def test_vm_neither_requires_docker_nor_waits_for_native_cleanup(self):
+        (self.job / 'spec.json').write_text(json.dumps(SPEC))
+        (self.job / 'status.json').write_text('{"driver":"vm"}')
+        (self.root / 'active-native-build').write_text(OTHER)
+        with patch.object(host, 'build_in_vm', return_value={'boot_id': 'fixture'}) as vm, \
+             patch.object(native_build, 'validate_builder') as docker:
+            host.run_build(JOB)
+            vm.assert_called_once()
+            docker.assert_not_called()
+        self.assertEqual('succeeded', host.status(JOB)['state'])
+        self.assertEqual(OTHER, (self.root / 'active-native-build').read_text())
+
     def test_local_builder_and_cache_configuration(self):
         valid = 'Driver: docker-container\nEndpoint: unix:///var/run/docker.sock\n'
         with patch.object(native_build.subprocess, 'run', return_value=Mock(stdout=valid)):

@@ -500,9 +500,9 @@ def run_build(build_id):
         started = time.monotonic()
         write_json(status_path, receipt | {'state': 'running'})
         try:
-            if (ROOT / 'active-native-build').exists():
-                raise ExecutionError('A previous native builder has not stopped')
             if driver == 'native':
+                if (ROOT / 'active-native-build').exists():
+                    raise ExecutionError('A previous native builder has not stopped')
                 if not native_build.allowed(config, spec):
                     raise ExecutionError('Project is no longer authorized for native builds')
                 admit_space(incoming=10 * 1024**3)
