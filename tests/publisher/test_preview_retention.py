@@ -165,3 +165,11 @@ class RetentionTests(unittest.TestCase):
                 db.execute("INSERT INTO jobs(id,project_id,kind,state,created,updated) VALUES(?,?,'project-export','queued',0,0)",(f'{i:024x}',p))
         self.assertEqual([],enqueue_due(self.store))
         self.assertEqual(1,len(enqueue_due(self.store)))
+
+    def test_failed_import_keeps_the_project_reserved_until_explicit_recovery(self):
+        old=self.release();self.release(days=0);self.enable()
+        with self.store.connection() as db:
+            db.execute("INSERT INTO jobs(id,project_id,kind,state,created,updated) VALUES(?,?,'project-import','failed',0,0)",('e'*24,self.project))
+        self.assertEqual([],enqueue_due(self.store));self.assertEqual('ready',self.state(old))
+        with self.store.connection() as db:db.execute("UPDATE jobs SET state='completed' WHERE id=?",('e'*24,))
+        self.reset_scan();self.assertEqual(1,len(enqueue_due(self.store)))
