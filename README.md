@@ -85,10 +85,32 @@ Both require `package-lock.json`. Runtime variables are available to server-side
 ## Platform source
 
 - `publisher/`: API, CLI, OAuth, deployments, PostgreSQL and volume binding, and project backup and import.
-- `execution/`: isolated VM build and runtime services, with restore and reconciliation tools.
+- `execution/`: the VM builder, optional native Docker builder, and tenant runtime/restore services.
 - `infra/`: service and networking templates; `fixtures/`: runnable sample applications.
 
 The hosted platform's credentials, routing configuration, and operational state are not part of this repository. For a separate installation, configure your own domains, VM access, and edge routing. The VM launcher templates expect an x86-64 Linux host with KVM. The execution host can set `npm_registry` in its `config.json` to a credential-free HTTPS npm mirror; leaving it unset preserves npm's default registry.
+
+## Trusted native builds on Linux
+
+Poteto defaults to a disposable VM builder (KVM or explicitly configured TCG). On a Linux/amd64 host with Docker and Buildx, an operator can enable the independent native driver for projects whose source, dependencies and uploaders are trusted. Tenant runtimes, data and routes still use their existing VM path. A login or scoped upload token does not make code trusted.
+
+Create one dedicated BuildKit builder per trusted project, using the configuration directory under the executor state root (default shown). Choose a vetted BuildKit image for your registry with the driver option `image=...` if the default is not reachable.
+
+```sh
+STATE=/srv/ovh-paas-execution
+PROJECT=YOUR_24_CHARACTER_PROJECT_ID
+CFG="$STATE/native-docker"
+sudo install -d -m 0700 "$CFG"
+sudo env HOME="$CFG" BUILDX_CONFIG="$CFG/buildx" \
+  docker --config "$CFG" --host unix:///var/run/docker.sock buildx create \
+  --name "poteto-native-$PROJECT" --driver docker-container \
+  --driver-opt memory=4g,memory-swap=4g,cpu-period=100000,cpu-quota=200000,restart-policy=no \
+  --buildkitd-config infra/execution/native-buildkit.toml unix:///var/run/docker.sock
+```
+
+Merge `"native_build_projects": {"PROJECT_ID": "OWNING_ACCOUNT_ID"}` into the executor's existing `config.json`. The publisher passes project identity internally; there is no client-side builder switch. Existing jobs keep their driver, and image imports always stay on the VM path. BuildKit caches are scoped to the dedicated project builder and kept when it stops. The supplied configuration sets cache collection targets; leave disk headroom for active builds.
+
+Remove the pair to disable native builds. A queued native job that loses authorization fails rather than switching drivers. After jobs drain, the operator can remove the dedicated builder and its cache without touching application data.
 
 ## Develop
 

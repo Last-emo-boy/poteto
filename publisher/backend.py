@@ -368,8 +368,9 @@ class Dokploy:
             build = {k:config[k] for k in ['runtime','build_command','start_command','output_directory','dockerfile'] if k in config}
             if imported and imported['image_path'] is not None:
                 build={'runtime':'image-import','image_reference':imported['reference']};archive=imported['image_path']
-            status = client.start_build(deployment['id'], build | {'account_id': account_id}, archive)
-        log('Isolated build job: ' + deployment['id'])
+            status = client.start_build(deployment['id'], build | {'account_id': account_id, 'project_id': deployment['project_id']}, archive)
+        driver = 'Native Docker' if status.get('driver') == 'native' else 'Isolated VM'
+        log(driver + ' build job: ' + deployment['id'])
         output = BuildOutput(client, deployment['id'], log)
         deadline = time.monotonic() + 1250
         while status['state'] in {'queued', 'running'}:

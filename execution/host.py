@@ -1,6 +1,6 @@
-"""Private host supervisor. All uploaded build commands run inside disposable KVM guests."""
+"""Private supervisor for tenant VMs and opt-in trusted native builds."""
 import base64
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, nullcontext
 import fcntl
 import http.server
 import json
@@ -17,6 +17,8 @@ import stat
 import subprocess
 import sys
 import time
+
+from execution import native_build
 
 ROOT = Path(os.environ.get("PAAS_EXEC_ROOT", "/srv/ovh-paas-execution"))
 RESTORES = Path('/srv/ovh-paas-platform/restore')
@@ -387,12 +389,14 @@ def build_log_chunk(build_id, offset):
     return {'data': base64.b64encode(chunk).decode('ascii')}
 
 
-def collect_build_output(command, path, timeout):
-    """Drain both SSH channels, publishing bounded stderr before the receipt."""
+def collect_build_output(command, path, timeout, *, archive=None, env=None):
+    """Drain logs while receiving a bounded JSON receipt or image archive."""
     deadline = time.monotonic() + timeout
     receipt = bytearray()
-    with path.open('wb', buffering=0) as log, selectors.DefaultSelector() as selector, \
-            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE) as process:
+    size = 0
+    image = archive.open("xb") if archive else nullcontext()
+    with image as output, path.open('wb', buffering=0) as log, selectors.DefaultSelector() as selector, \
+            subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as process:
         selector.register(process.stdout, selectors.EVENT_READ, 'receipt')
         selector.register(process.stderr, selectors.EVENT_READ, 'log')
         try:
@@ -406,93 +410,134 @@ def collect_build_output(command, path, timeout):
                         selector.unregister(key.fileobj)
                     elif key.data == 'log':
                         log.write(data[:max(0, BUILD_LOG_LIMIT - log.tell())])
+                    elif output is not None:
+                        size += len(data)
+                        if size > 1024**3:
+                            raise ExecutionError("Built image exceeds 1 GiB")
+                        output.write(data)
                     else:
                         if len(receipt) + len(data) > 4096:
                             raise ExecutionError('Guest build receipt exceeds its limit')
                         receipt.extend(data)
             if process.wait(timeout=max(0, deadline - time.monotonic())):
-                raise ExecutionError('Guest build session failed; inspect deployment logs')
-            return json.loads(receipt)
+                raise ExecutionError('Build process failed; inspect deployment logs')
+            return size if output is not None else json.loads(receipt)
         finally:
             if process.poll() is None:
                 process.kill()
 
 
+def build_in_vm(build_id, job, spec):
+    (ROOT / 'active-build').write_text(build_id)
+    (ROOT / 'last-build').write_text(build_id)
+    alias = "build-" + build_id
+    try:
+        systemctl("stop", "paas-builder.service")
+        reset_disk("builder")
+        systemctl("start", "paas-builder.service")
+        wait_ready("builder", 22099, alias, timeout=180)
+        boot_id = ssh(22099, alias, "cat /proc/sys/kernel/random/boot_id").stdout.decode().strip()
+        write_json(job / "status.json", {"id": build_id, "state": "running", "driver": "vm", "boot_id": boot_id})
+        ssh(22099, alias, "sudo -n mkdir -p /work /opt/paas-execution/publisher")
+        for path, target in [(CODE / "execution/guest_build.py", "/opt/paas-execution/guest_build.py"),
+                             (CODE / "execution/build_source.py", "/opt/paas-execution/build_source.py"),
+                             (CODE / "publisher/archive.py", "/opt/paas-execution/publisher/archive.py"),
+                             (CODE / "publisher/__init__.py", "/opt/paas-execution/publisher/__init__.py")]:
+            ssh(22099, alias, "sudo -n tee " + target + " >/dev/null", data=path.read_bytes())
+        ssh(22099, alias, "sudo -n tee /work/spec.json >/dev/null", data=json.dumps(spec | {"id": build_id}).encode())
+        with (job / "source.tar.gz").open("rb") as source:
+            subprocess.run(["/opt/paas-execution/ssh-stream", str(22099), alias, "sudo -n tee /work/source.tar.gz >/dev/null"], stdin=source, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=120)
+        command = ['/opt/paas-execution/ssh-stream', '22099', alias,
+                   'sudo -n env POTETO_STREAM_BUILD_LOG=1 python3 /opt/paas-execution/guest_build.py']
+        if collect_build_output(command, job / 'build.log', timeout=900)['state'] != 'succeeded':
+            raise ExecutionError("Application build failed; inspect deployment logs")
+        image_disk_bytes=int(ssh(22099,alias,'sudo -n docker image inspect --format "{{.Size}}" paas-release:'+build_id).stdout.strip())
+        if not 0<image_disk_bytes<=16*1024**3:
+            raise ExecutionError('Built image disk size is invalid')
+        # Bound host storage even if uploaded code compromises its own disposable guest.
+        process = subprocess.Popen(["/opt/paas-execution/ssh-stream", str(22099), alias, "sudo -n cat /work/image.tar"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        size = 0
+        try:
+            with (job / "image.tar.next").open("wb") as out:
+                while chunk := process.stdout.read(1024**2):
+                    size += len(chunk)
+                    if size > 1024**3:
+                        raise ExecutionError("Built image exceeds 1 GiB")
+                    out.write(chunk)
+            if process.wait(timeout=30):
+                raise ExecutionError("Built image transfer failed")
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                process.wait(timeout=10)
+        (job / "image.tar.next").replace(job / "image.tar")
+        return {"image": "paas-release:" + build_id, "image_bytes": size, "image_disk_bytes": image_disk_bytes, "boot_id": boot_id}
+    finally:
+        systemctl("stop", "paas-builder.service")
+        (ROOT / 'active-build').unlink(missing_ok=True)
+
+
+def stop_native_build(build_id):
+    active = ROOT / 'active-native-build'
+    if active.exists() and active.read_text() == build_id:
+        job = ROOT / 'builds' / build_id
+        project = json.loads((job / 'spec.json').read_text())['project_id']
+        native_build.finish(ROOT, job, project)
+        active.unlink()
+
+
 def run_build(build_id):
-    checked_id(build_id)
-    job = ROOT / "builds" / build_id
+    job = ROOT / "builds" / checked_id(build_id)
     spec = json.loads((job / "spec.json").read_text())
     config_path = ROOT / 'config.json'
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
     if 'npm_registry' in config:
         spec['npm_registry'] = config['npm_registry']
     with lock("builder"):
-        write_json(job / "status.json", {"id": build_id, "state": "running"})
-        (ROOT / 'active-build').write_text(build_id)
-        (ROOT / 'last-build').write_text(build_id)
-        systemctl("stop", "paas-builder.service")
-        reset_disk("builder")
-        systemctl("start", "paas-builder.service")
-        alias = "build-" + build_id
+        status_path = job / 'status.json'
+        driver = json.loads(status_path.read_text()).get('driver', 'vm') if status_path.exists() else 'vm'
+        receipt = {'id': build_id, 'driver': driver}
+        started = time.monotonic()
+        write_json(status_path, receipt | {'state': 'running'})
         try:
-            wait_ready("builder", 22099, alias, timeout=180)
-            boot_id = ssh(22099, alias, "cat /proc/sys/kernel/random/boot_id").stdout.decode().strip()
-            write_json(job / "status.json", {"id": build_id, "state": "running", "boot_id": boot_id})
-            ssh(22099, alias, "sudo -n mkdir -p /work /opt/paas-execution/publisher")
-            for path, target in [(CODE / "execution/guest_build.py", "/opt/paas-execution/guest_build.py"),
-                                 (CODE / "publisher/archive.py", "/opt/paas-execution/publisher/archive.py"),
-                                 (CODE / "publisher/__init__.py", "/opt/paas-execution/publisher/__init__.py")]:
-                ssh(22099, alias, "sudo -n tee " + target + " >/dev/null", data=path.read_bytes())
-            ssh(22099, alias, "sudo -n tee /work/spec.json >/dev/null", data=json.dumps(spec | {"id": build_id}).encode())
-            with (job / "source.tar.gz").open("rb") as source:
-                subprocess.run(["/opt/paas-execution/ssh-stream", str(22099), alias, "sudo -n tee /work/source.tar.gz >/dev/null"], stdin=source, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=120)
-            command = ['/opt/paas-execution/ssh-stream', '22099', alias,
-                       'sudo -n env POTETO_STREAM_BUILD_LOG=1 python3 /opt/paas-execution/guest_build.py']
-            if collect_build_output(command, job / 'build.log', timeout=900)['state'] != 'succeeded':
-                raise ExecutionError("Application build failed; inspect deployment logs")
-            image_disk_bytes=int(ssh(22099,alias,'sudo -n docker image inspect --format "{{.Size}}" paas-release:'+build_id).stdout.strip())
-            if not 0<image_disk_bytes<=16*1024**3:
-                raise ExecutionError('Built image disk size is invalid')
-            # Bound host storage even if uploaded code compromises its own disposable guest.
-            process = subprocess.Popen(["/opt/paas-execution/ssh-stream", str(22099), alias, "sudo -n cat /work/image.tar"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-            size = 0
-            try:
-                with (job / "image.tar.next").open("wb") as out:
-                    while chunk := process.stdout.read(1024**2):
-                        size += len(chunk)
-                        if size > 1024**3:
-                            raise ExecutionError("Built image exceeds 1 GiB")
-                        out.write(chunk)
-                if process.wait(timeout=30):
-                    raise ExecutionError("Built image transfer failed")
-            finally:
-                if process.poll() is None:
-                    process.terminate()
-                    process.wait(timeout=10)
-            (job / "image.tar.next").replace(job / "image.tar")
-            write_json(job / "status.json", {"id": build_id, "state": "succeeded", "image": "paas-release:" + build_id, "image_bytes": size, "image_disk_bytes":image_disk_bytes, "boot_id": boot_id})
+            if (ROOT / 'active-native-build').exists():
+                raise ExecutionError('A previous native builder has not stopped')
+            if driver == 'native':
+                if not native_build.allowed(config, spec):
+                    raise ExecutionError('Project is no longer authorized for native builds')
+                admit_space(incoming=10 * 1024**3)
+                native_build.validate_builder(ROOT, spec['project_id'])
+                (ROOT / 'active-native-build').write_text(build_id)
+                try:
+                    result = native_build.build(ROOT, job, spec, collect_build_output)
+                finally:
+                    stop_native_build(build_id)
+            elif driver == 'vm':
+                result = build_in_vm(build_id, job, spec)
+            else:
+                raise ExecutionError('Unknown build driver')
+            write_json(status_path, receipt | result | {'state': 'succeeded', 'build_seconds': round(time.monotonic() - started, 1)})
         except Exception as error:
             # Never rewrite bytes that a live reader may already have consumed.
             if not (job / 'build.log').exists():
-                (job / 'build.log').write_text('Guest build output was unavailable after ' + type(error).__name__ + '\n')
+                prefix = 'Guest' if driver == 'vm' else 'Native'
+                (job / 'build.log').write_text(f'{prefix} build output was unavailable after {type(error).__name__}\n')
             message = (f"Build step exceeded its {error.timeout}-second time limit; inspect deployment logs"
                        if isinstance(error, subprocess.TimeoutExpired) else
-                       str(error) if isinstance(error, ExecutionError) else "Host build driver failed")
-            write_json(job / "status.json", {"id": build_id, "state": "failed", "error": message})
+                       str(error) if isinstance(error, (ExecutionError, ValueError)) else "Host build driver failed")
+            write_json(status_path, receipt | {'state': 'failed', 'error': message})
             raise
-        finally:
-            systemctl("stop", "paas-builder.service")
-            (ROOT / 'active-build').unlink(missing_ok=True)
 
 
 def finish_build(build_id):
-    """Also runs after SIGKILL/time limits; never stops another job's VM."""
+    """Stop only the builder still owned by this job, including after SIGKILL."""
     checked_id(build_id)
     with (ROOT / 'builder.lock').open('a') as handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             return
+        stop_native_build(build_id)
         active = ROOT / 'active-build'
         if active.exists() and active.read_text() == build_id:
             systemctl('stop', 'paas-builder.service')
@@ -515,6 +560,11 @@ def build_operation(build_id, account_id, action):
     if action == 'delete':
         if unit_state(f'paas-build@{build_id}.service') not in {'inactive', 'failed'}:
             raise ExecutionError('Build is still supervised; cancel it before deleting')
+        active_native = ROOT / 'active-native-build'
+        if active_native.exists() and active_native.read_text() == build_id:
+            finish_build(build_id)
+            if active_native.exists() and active_native.read_text() == build_id:
+                raise ExecutionError('Native builder still needs cleanup before deleting')
         shutil.rmtree(job)
         with (ROOT / 'builder.lock').open('a') as handle:
             try:
@@ -780,6 +830,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 raise ValueError("Invalid build upload")
             spec = json.loads(base64.urlsafe_b64decode(self.headers["X-Paas-Build-Spec"]))
             leases.enter_context(active_account(spec["account_id"]))
+            if 'project_id' in spec:
+                checked_id(spec['project_id'])
             if spec.get('runtime')=='image-import':
                 reference=spec.get('image_reference')
                 if self.headers.get('Content-Type')!='application/x-tar' or not isinstance(reference,str) or not re.fullmatch(r'(?:paas-release:[a-f0-9]{24}|sha256:[a-f0-9]{64})',reference):
@@ -801,12 +853,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         size -= len(chunk)
                 with lock("submit"):
                     if (job / "status.json").exists():
-                        if json.loads((job / "spec.json").read_text()) != spec:
+                        previous = json.loads((job / "spec.json").read_text())
+                        if previous != spec and not ('project_id' not in previous and
+                                                     previous == {k: v for k, v in spec.items() if k != 'project_id'}):
                             return self.response(409, {"error": "Build ID already has a different specification"})
                     else:
+                        config_path = ROOT / 'config.json'
+                        config = json.loads(config_path.read_text()) if config_path.exists() else {}
+                        driver = 'native' if native_build.allowed(config, spec) else 'vm'
                         pending.replace(job / "source.tar.gz")
                         write_json(job / "spec.json", spec)
-                        write_json(job / "status.json", {"id": resource_id, "state": "queued"})
+                        write_json(job / "status.json", {"id": resource_id, "state": "queued", "driver": driver})
                         systemctl("start", f"paas-build@{resource_id}.service")
             finally:
                 pending.unlink(missing_ok=True)

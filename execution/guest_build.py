@@ -5,41 +5,12 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-from urllib.parse import urlsplit
-from publisher.archive import unpack
+if __package__:
+    from .build_source import dockerfile, npm_command, prepare_source
+else:
+    from build_source import dockerfile, npm_command, prepare_source
 
 WORK = Path("/work")
-
-
-def npm_command(spec, *arguments):
-    command = ['npm', *arguments]
-    registry = spec.get('npm_registry')
-    if registry is not None:
-        parsed = urlsplit(registry)
-        if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-            raise ValueError('Build npm registry must be an HTTPS URL without credentials')
-        command += ['--registry', registry]
-    return command
-
-
-def dockerfile(spec):
-    runtime = spec["runtime"]
-    if runtime == "static" and not spec.get("build_command"):
-        return "FROM nginx:1.28-alpine\nCOPY . /usr/share/nginx/html/\n"
-    lines = ["FROM node:24-alpine AS build", "WORKDIR /app", "COPY . .", "RUN " + json.dumps(npm_command(spec, 'ci'))]
-    if spec.get("build_command"):
-        lines.append("RUN " + json.dumps(["sh", "-c", spec["build_command"]]))
-    if runtime == "static":
-        output = spec.get("output_directory", ".")
-        parts = Path(output).parts
-        if Path(output).is_absolute() or ".." in parts or "\\" in output:
-            raise ValueError("Static output directory must be inside the project")
-        lines += ["FROM nginx:1.28-alpine", "COPY --from=build " + json.dumps(["/app/" + output, "/usr/share/nginx/html/"])]
-    else:
-        lines += ["RUN " + json.dumps(npm_command(spec, 'prune', '--omit=dev')), "FROM node:24-alpine", "WORKDIR /app", "ENV NODE_ENV=production",
-                  "COPY --from=build --chown=10001:10001 /app /app", "USER 10001:10001",
-                  "CMD " + json.dumps(["sh", "-c", spec.get("start_command") or "npm start"])]
-    return "\n".join(lines) + "\n"
 
 
 def record_log(log, data):
@@ -72,25 +43,8 @@ def normalize_image(spec,image):
 
 
 def build_source(spec,image):
-    source = WORK / "source"
-    source.mkdir(mode=0o755)
-    unpack(WORK / "source.tar.gz", source, max_bytes=200 * 1024**2, max_files=10000)
-    if spec["runtime"] == "dockerfile":
-        path = (source / spec.get("dockerfile", "Dockerfile")).resolve()
-        if not path.is_relative_to(source) or not path.is_file():
-            raise ValueError("Dockerfile must exist inside the uploaded project")
-    else:
-        if spec["runtime"] == "node" or spec.get("build_command"):
-            if not (source / "package-lock.json").is_file():
-                raise ValueError("Node source builds require package-lock.json for npm ci")
-        if spec["runtime"] == "static" and not spec.get("build_command"):
-            source = (source / spec.get("output_directory", ".")).resolve()
-            if not source.is_relative_to(WORK / "source") or not (source / "index.html").is_file():
-                raise ValueError("Static output directory must contain index.html")
-        path = WORK / "Dockerfile"
-        path.write_text(dockerfile(spec))
-    command = ["docker", "build", "--progress=plain", "--tag", image, "--file", str(path), str(source)]
-    return logged(command)
+    source, path = prepare_source(spec, WORK, WORK / 'source.tar.gz')
+    return logged(["docker", "build", "--progress=plain", "--tag", image, "--file", str(path), str(source)])
 
 
 def main():

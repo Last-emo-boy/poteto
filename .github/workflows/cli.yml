@@ -3,6 +3,8 @@ on:
   push:
     paths:
       - 'publisher/**'
+      - 'execution/**'
+      - 'infra/execution/**'
       - 'scripts/build-poteto-dist'
       - 'scripts/install-poteto.*'
       - 'tests/**'
