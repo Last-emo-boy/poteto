@@ -230,6 +230,17 @@ class ArchiveCliTests(unittest.TestCase):
                              '--deployment','https://preview-'+release+'.page.iflink.tech','--no-wait'])
         self.assertEqual(release,client.request.call_args.args[2]['deployment_id'])
 
+    def test_production_export_does_not_require_a_preview_argument(self):
+        client=self.command(['export','create','c'*24,'--recipient','age1'+'a'*58,'--no-wait'])
+        self.assertEqual(('POST','/v1/projects/'+'c'*24+'/exports'),client.request.call_args.args[:2])
+        self.assertNotIn('deployment_id',client.request.call_args.args[2])
+
+    def test_export_rejects_a_production_url_instead_of_silently_resolving_it(self):
+        with self.assertRaises(SystemExit) as error:
+            self.command(['export','create','c'*24,'--recipient','age1'+'a'*58,
+                          '--deployment','https://app-'+'c'*24+'.page.iflink.tech','--no-wait'])
+        self.assertEqual(1,error.exception.code)
+
     def test_preview_import_is_explicit_and_legacy_default_stays_omitted(self):
         args=['import','create','c'*24,'backup.age','--identity','identity.txt','--no-wait']
         client=self.command(args+['--preview'])

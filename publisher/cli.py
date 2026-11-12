@@ -554,7 +554,7 @@ def main(prog="poteto"):
             args.project = args.project or linked_project or signed_in_project
             if args.project is None and args.command not in {"deploy", "deployments", "link"}:
                 parser.error("Choose a project with --project, poteto link, or poteto login")
-        if hasattr(args, "deployment"):
+        if hasattr(args, "deployment") and args.command != 'export':
             kind, reference = deployment_reference(args.deployment)
             if kind == "project":
                 reference = client.request("GET", "/v1/projects/" + reference)["current_deployment"]
