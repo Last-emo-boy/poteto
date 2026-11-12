@@ -14,7 +14,7 @@ from pydantic import Field
 from publisher.backend import BackendError
 from publisher.data_store import DataStore
 from publisher.models import Input
-from publisher.project_bundle import BUNDLE_LIMIT,FORMAT,ID
+from publisher.project_bundle import BUNDLE_LIMIT,FORMAT,ID,open_zip
 from publisher.static_artifacts import BUILT_LIMIT, built_archive
 from publisher.store import ARTIFACT_DRIVER, SANDBOX_DRIVER, NATIVE_DATABASE_DRIVER, PREVIEW_SCOPE, PREVIEW_ENV_SCOPE, PREVIEW_DATA_SCOPE, Problem, ident
 
@@ -23,6 +23,31 @@ LIMIT=BUNDLE_LIMIT
 CHUNK=8*1024**2
 TTL=86400
 MANAGED={'DATABASE_URL','PORT','PAAS_DATA_DIR','PAAS_DEPLOYMENT_URL','PAAS_PROJECT_URL'}
+
+
+def native_data(store, client, resources, output, request, check):
+    limit = 2*1024**3
+    def snapshot(resource, target):
+        client.stream_export('POST', '/v1/databases/'+resource['id']+'/snapshot', target,
+                             limit+16*1024**2, check, body=request)
+    if len(resources) == 1:
+        snapshot(resources[0], output)
+        return
+    with tempfile.TemporaryDirectory(dir=directory(store), prefix='native-export-') as temporary:
+        path = Path(temporary)/'snapshot.zip'
+        with zipfile.ZipFile(output, 'w') as combined:
+            for resource in resources:
+                check()
+                with path.open('wb') as target:
+                    snapshot(resource, target)
+                with open_zip(path, limit=limit+16*1024**2, max_entries=1) as (archive, entries):
+                    name = 'databases/'+resource['id']+'.dump'
+                    if set(entries) != {name} or entries[name].file_size > limit:
+                        raise BackendError('Native snapshot does not match its database resource')
+                    with archive.open(name) as source, combined.open(name, 'w', force_zip64=True) as target:
+                        while chunk := source.read(1024**2):
+                            check(); target.write(chunk)
+                path.unlink()
 
 
 class ExportInput(Input):
@@ -230,9 +255,8 @@ def execute(worker,job,release):
                         if resources:
                             with bundle.open('data.zip','w',force_zip64=True) as out:
                                 if all(row['runtime_driver']==NATIVE_DATABASE_DRIVER for row in resources):
-                                    if len(resources)!=1:raise BackendError('Native export requires exactly one preview database')
-                                    client.stream_export('POST','/v1/databases/'+resources[0]['id']+'/snapshot',out,2*1024**3+16*1024**2,worker.check,
-                                        body={'operation':operation,'project_id':project_id,'account_id':account})
+                                    native_data(store,client,resources,out,
+                                        {'operation':operation,'project_id':project_id,'account_id':account},worker.check)
                                 else:
                                     client.bootstrap(account)
                                     client.stream_export('POST','/v1/runtimes/'+account+'/snapshot',out,12*1024**3+16*1024**2,worker.check,

@@ -1,9 +1,11 @@
 from dataclasses import replace
+import io
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
@@ -15,6 +17,7 @@ from publisher.login_contract import ISSUER, LOGIN_PATH
 from publisher.oidc_login import CliLogin, PRODUCTION_SCOPES, PROJECT_MANAGEMENT_SCOPES
 from publisher.store import PREVIEW_SCOPE
 from publisher.worker import Worker
+from publisher import project_exports
 
 
 class PersonalProductionTests(unittest.TestCase):
@@ -156,6 +159,35 @@ class PersonalProductionTests(unittest.TestCase):
             project = db.execute('SELECT * FROM projects WHERE id=?', (self.project,)).fetchone()
             self.assertEqual({'MODE':'production'}, self.store.environment(project, 'production'))
         self.assertEqual(403, self.preview.get(path).status_code)
+
+    def test_two_native_stage_snapshots_share_one_portable_data_archive(self):
+        resources = [{'id':'a'*24}, {'id':'b'*24}]
+        project_exports.directory(self.store).mkdir(exist_ok=True)
+        client = Mock()
+        def stream(method, path, output, *args, **kwargs):
+            resource = path.split('/')[3]
+            with zipfile.ZipFile(output, 'w') as archive:
+                archive.writestr('databases/'+resource+'.dump', b'PGDMP-'+resource.encode())
+        client.stream_export.side_effect = stream
+        output = io.BytesIO()
+        project_exports.native_data(self.store, client, resources, output, {'operation':'c'*24}, Mock())
+        with zipfile.ZipFile(io.BytesIO(output.getvalue())) as archive:
+            self.assertEqual({'databases/'+r['id']+'.dump' for r in resources}, set(archive.namelist()))
+            for resource in resources:
+                self.assertEqual(b'PGDMP-'+resource['id'].encode(), archive.read('databases/'+resource['id']+'.dump'))
+        client.bootstrap.assert_not_called()
+        self.assertEqual([], list(project_exports.directory(self.store).glob('native-export-*')))
+
+    def test_native_snapshot_cannot_substitute_another_resource(self):
+        project_exports.directory(self.store).mkdir(exist_ok=True)
+        client = Mock()
+        def stream(method, path, output, *args, **kwargs):
+            with zipfile.ZipFile(output, 'w') as archive:
+                archive.writestr('databases/'+'f'*24+'.dump', b'PGDMP')
+        client.stream_export.side_effect = stream
+        with self.assertRaisesRegex(BackendError, 'does not match'):
+            project_exports.native_data(self.store, client, [{'id':'a'*24},{'id':'b'*24}],
+                                        io.BytesIO(), {'operation':'c'*24}, Mock())
 
 
 class ProductionLoginTests(unittest.TestCase):
