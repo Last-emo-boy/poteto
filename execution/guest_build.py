@@ -44,7 +44,8 @@ def normalize_image(spec,image):
 
 def build_source(spec,image):
     source, path = prepare_source(spec, WORK, WORK / 'source.tar.gz')
-    return logged(["docker", "build", "--progress=plain", "--tag", image, "--file", str(path), str(source)])
+    output = ["--output", "type=tar,dest=" + str(WORK / "static.tar")] if spec.get("output_kind") == "static" else ["--tag", image]
+    return logged(["docker", "build", "--progress=plain", *output, "--file", str(path), str(source)])
 
 
 def main():
@@ -52,6 +53,9 @@ def main():
     ready=normalize_image(spec,image) if spec['runtime']=='image-import' else build_source(spec,image)
     if not ready:
         print(json.dumps({"state": "failed"}))
+        return
+    if spec.get("output_kind") == "static":
+        print(json.dumps({"state": "succeeded", "output_kind": "static"}))
         return
     subprocess.run(["docker", "save", "--output", str(WORK / "image.tar"), image], check=True)
     print(json.dumps({"state": "succeeded", "image": image}))

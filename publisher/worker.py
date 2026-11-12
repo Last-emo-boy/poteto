@@ -302,9 +302,15 @@ class Worker:
             self.backend.publish_sandbox(deployment, archive, lambda text: self.log(deployment, text), self.check)
             self.state(deployment['id'], 'deploying', backend_id=SANDBOX_DRIVER)
         elif artifact:
-            self.log(deployment, 'Publishing prebuilt static files; no build or runtime VM')
             archive = self.store.settings.root / 'artifacts' / f"{deployment['id']}.tar.gz"
-            self.backend.publish_artifact(deployment, archive, self.check)
+            if config.get('build_command'):
+                self.state(deployment['id'], 'building')
+                self.log(deployment, 'Building static files for direct hosting; no runtime VM')
+                self.backend.publish_artifact(deployment, archive, self.check,
+                    log=lambda text: self.log(deployment, text), restored=(imported or {}).get('built_path'))
+            else:
+                self.log(deployment, 'Publishing prebuilt static files; no build or runtime VM')
+                self.backend.publish_artifact(deployment, archive, self.check)
             self.state(deployment['id'], 'deploying', backend_id=ARTIFACT_DRIVER)
         elif deployment["backend_id"]:
             self.log(deployment, "Reconciling the existing deployment after worker restart")

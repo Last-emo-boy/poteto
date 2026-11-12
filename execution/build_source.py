@@ -29,7 +29,8 @@ def dockerfile(spec, *, cached=False):
         parts = Path(output).parts
         if Path(output).is_absolute() or ".." in parts or "\\" in output:
             raise ValueError("Static output directory must be inside the project")
-        lines += ["FROM nginx:1.28-alpine", "COPY --from=build " + json.dumps(["/app/" + output, "/usr/share/nginx/html/"])]
+        final, destination = ("scratch", "/") if spec.get("output_kind") == "static" else ("nginx:1.28-alpine", "/usr/share/nginx/html/")
+        lines += ["FROM " + final, "COPY --from=build " + json.dumps(["/app/" + output, destination])]
     else:
         lines += [run + json.dumps(npm_command(spec, 'prune', '--omit=dev')), "FROM node:24-alpine", "WORKDIR /app", "ENV NODE_ENV=production",
                   "COPY --from=build --chown=10001:10001 /app /app", "USER 10001:10001",

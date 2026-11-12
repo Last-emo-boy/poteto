@@ -52,6 +52,7 @@ CREATE TABLE IF NOT EXISTS deployments (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), state TEXT NOT NULL,
  config TEXT NOT NULL, environment TEXT NOT NULL, artifact_bytes INTEGER NOT NULL DEFAULT 0,
  unpacked_bytes INTEGER NOT NULL DEFAULT 0,
+ built_bytes INTEGER NOT NULL DEFAULT 0,
  error TEXT, backend_id TEXT, idempotency_key TEXT, created REAL NOT NULL, updated REAL NOT NULL,
  runtime_driver TEXT,
  UNIQUE(project_id, idempotency_key));
@@ -124,6 +125,8 @@ class Store:
                 db.execute("ALTER TABLE deployments ADD COLUMN preview_access INTEGER NOT NULL DEFAULT 0")
             if 'runtime_driver' not in {r['name'] for r in db.execute('PRAGMA table_info(deployments)')}:
                 db.execute("ALTER TABLE deployments ADD COLUMN runtime_driver TEXT")
+            if 'built_bytes' not in {r['name'] for r in db.execute('PRAGMA table_info(deployments)')}:
+                db.execute("ALTER TABLE deployments ADD COLUMN built_bytes INTEGER NOT NULL DEFAULT 0")
             if 'app_domain' not in {r['name'] for r in db.execute('PRAGMA table_info(projects)')}:
                 db.execute("ALTER TABLE projects ADD COLUMN app_domain TEXT")
             db.execute('UPDATE projects SET app_domain=? WHERE app_domain IS NULL',(settings.domain,))
@@ -442,13 +445,29 @@ class Store:
             except sqlite3.IntegrityError:
                 raise Problem(409, "An upload for this deployment is already in progress") from None
 
+    @staticmethod
+    def storage_used(db, account_id):
+        return db.execute("SELECT coalesce(sum(d.artifact_bytes+d.unpacked_bytes+d.built_bytes),0) FROM deployments d "
+                          "JOIN projects p ON p.id=d.project_id WHERE p.account_id=?", (account_id,)).fetchone()[0]
+
+    def reserve_built_artifact(self, deployment_id, size):
+        with self.connection() as db:
+            row = db.execute("SELECT p.account_id,a.max_storage,d.built_bytes FROM deployments d "
+                             "JOIN projects p ON p.id=d.project_id JOIN accounts a ON a.id=p.account_id "
+                             "WHERE d.id=? AND d.runtime_driver=?", (deployment_id, ARTIFACT_DRIVER)).fetchone()
+            if row is None:
+                raise Problem(409, "Static release no longer owns this build")
+            if self.storage_used(db, row['account_id']) - row['built_bytes'] + size > row['max_storage']:
+                raise Problem(429, "Built files exceed the account artifact storage quota")
+            db.execute("UPDATE deployments SET built_bytes=? WHERE id=?", (size, deployment_id))
+
     def enqueue_upload(self, actor, deployment_id, path, size, unpacked_bytes):
         with self.connection() as db:
             deployment = self.deployment(db, actor, deployment_id, "deployments:write", allow_preview=True)
             if deployment["state"] != "uploading":
                 raise Problem(409, "Deployment no longer accepts an upload")
             account = db.execute("SELECT * FROM accounts WHERE id=?", (actor["account_id"],)).fetchone()
-            used = db.execute("SELECT coalesce(sum(d.artifact_bytes+d.unpacked_bytes),0) FROM deployments d JOIN projects p ON d.project_id=p.id WHERE p.account_id=?", (actor["account_id"],)).fetchone()[0]
+            used = self.storage_used(db, actor["account_id"])
             if used + size + unpacked_bytes > account["max_storage"]:
                 raise Problem(429, "Artifact storage quota reached")
             path.replace(self.settings.root / "artifacts" / f"{deployment_id}.tar.gz")

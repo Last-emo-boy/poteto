@@ -26,6 +26,7 @@ CODE = Path(__file__).resolve().parents[1]
 RUNTIME_VERSION = "11"
 ID = re.compile(r"[a-f0-9]{24}")
 BUILD_LOG_LIMIT = 2 * 1024**2
+STATIC_ARCHIVE_LIMIT = 50 * 1024**2
 
 
 class ExecutionError(RuntimeError):
@@ -389,7 +390,7 @@ def build_log_chunk(build_id, offset):
     return {'data': base64.b64encode(chunk).decode('ascii')}
 
 
-def collect_build_output(command, path, timeout, *, archive=None, env=None):
+def collect_build_output(command, path, timeout, *, archive=None, env=None, archive_limit=1024**3):
     """Drain logs while receiving a bounded JSON receipt or image archive."""
     deadline = time.monotonic() + timeout
     receipt = bytearray()
@@ -412,8 +413,8 @@ def collect_build_output(command, path, timeout, *, archive=None, env=None):
                         log.write(data[:max(0, BUILD_LOG_LIMIT - log.tell())])
                     elif output is not None:
                         size += len(data)
-                        if size > 1024**3:
-                            raise ExecutionError("Built image exceeds 1 GiB")
+                        if size > archive_limit:
+                            raise ExecutionError("Build output exceeds its archive size limit")
                         output.write(data)
                     else:
                         if len(receipt) + len(data) > 4096:
@@ -449,8 +450,23 @@ def build_in_vm(build_id, job, spec):
             subprocess.run(["/opt/paas-execution/ssh-stream", str(22099), alias, "sudo -n tee /work/source.tar.gz >/dev/null"], stdin=source, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=120)
         command = ['/opt/paas-execution/ssh-stream', '22099', alias,
                    'sudo -n env POTETO_STREAM_BUILD_LOG=1 python3 /opt/paas-execution/guest_build.py']
-        if collect_build_output(command, job / 'build.log', timeout=900)['state'] != 'succeeded':
+        result = collect_build_output(command, job / 'build.log', timeout=900)
+        if result['state'] != 'succeeded':
             raise ExecutionError("Application build failed; inspect deployment logs")
+        if spec.get("output_kind") == "static":
+            if result.get("output_kind") != "static":
+                raise ExecutionError("Builder did not return static files")
+            pending = job / "static.tar.gz.next"
+            transfer = ["/opt/paas-execution/ssh-stream", "22099", alias, "sudo -n gzip -n -c /work/static.tar"]
+            try:
+                size = collect_build_output(transfer, job / "artifact-transfer.log", timeout=120,
+                                            archive=pending, archive_limit=STATIC_ARCHIVE_LIMIT)
+                if not size:
+                    raise ExecutionError("Static build archive is empty")
+                pending.replace(job / "static.tar.gz")
+            finally:
+                pending.unlink(missing_ok=True)
+            return {"output_kind": "static", "artifact_bytes": size, "boot_id": boot_id}
         image_disk_bytes=int(ssh(22099,alias,'sudo -n docker image inspect --format "{{.Size}}" paas-release:'+build_id).stdout.strip())
         if not 0<image_disk_bytes<=16*1024**3:
             raise ExecutionError('Built image disk size is invalid')
@@ -686,6 +702,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
             try:shutil.copyfileobj(source,self.wfile,1024**2)
             except (BrokenPipeError,ConnectionResetError):return
 
+    def send_static_artifact(self, build_id):
+        job = ROOT / "builds" / checked_id(build_id)
+        account = checked_id(self.headers.get("X-Paas-Account", ""))
+        project = checked_id(self.headers.get("X-Paas-Project", ""))
+        spec = json.loads((job / "spec.json").read_text())
+        receipt = status(build_id)
+        if (spec.get("account_id"), spec.get("project_id"), receipt.get("state"), receipt.get("output_kind")) != (
+                account, project, "succeeded", "static"):
+            return self.response(404, {"error": "Built static artifact unavailable"})
+        with (job / "static.tar.gz").open("rb") as source:
+            size = os.fstat(source.fileno()).st_size
+            if not 0 < size <= STATIC_ARCHIVE_LIMIT or size != receipt["artifact_bytes"]:
+                raise ExecutionError("Built static archive size does not match its receipt")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/gzip")
+            self.send_header("Content-Length", str(size))
+            self.end_headers()
+            try:
+                shutil.copyfileobj(source, self.wfile, 1024**2)
+            except (BrokenPipeError, ConnectionResetError):
+                return
+
     def snapshot_stream(self,account,body):
         operation=checked_id(body['operation']);project=checked_id(body['project_id'])
         target=runtime(account)
@@ -770,6 +808,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.response(200, build_log_chunk(parts[2], int(parts[4])))
             if len(parts)==4 and parts[:2]==['v1','builds'] and parts[3]=='image':
                 return self.send_image(parts[2])
+            if len(parts) == 4 and parts[:2] == ["v1", "builds"] and parts[3] == "static":
+                return self.send_static_artifact(parts[2])
             if len(parts) == 3 and parts[:2] == ["v1", "builds"]:
                 return self.response(200, status(parts[2]))
             if len(parts) == 3 and parts[:2] == ["v1", "runtimes"]:
@@ -844,6 +884,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             require_native = spec.get('require_native', False)
             if type(require_native) is not bool:
                 raise ValueError('Invalid native build requirement')
+            output_kind = spec.get("output_kind", "image")
+            if output_kind != "image" and (output_kind != "static" or spec.get("runtime") != "static"
+                    or not isinstance(spec.get("build_command"), str) or not spec["build_command"].strip()
+                    or require_native or not spec.get("project_id")):
+                raise ValueError("Invalid static build request")
             if require_native and not native_build.allowed(json.loads((ROOT / 'config.json').read_text()), spec):
                 raise ExecutionError('Sandbox preview requires a trusted native build')
             if spec.get('runtime')=='image-import':
@@ -874,7 +919,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     else:
                         config_path = ROOT / 'config.json'
                         config = json.loads(config_path.read_text()) if config_path.exists() else {}
-                        driver = 'native' if native_build.allowed(config, spec) else 'vm'
+                        driver = 'native' if output_kind == "image" and native_build.allowed(config, spec) else 'vm'
                         if require_native and driver != 'native':
                             raise ExecutionError('Project is no longer authorized for native builds')
                         pending.replace(job / "source.tar.gz")

@@ -19,6 +19,7 @@ class Settings:
     file_limit: int = 10000
     new_app_domain: str | None = None
     static_artifacts: bool | tuple[str, ...] = False
+    static_source_builds: bool = False
     sandbox_projects: tuple[str, ...] = ()
 
     def __post_init__(self):
@@ -41,10 +42,14 @@ class Settings:
         ):
             raise ValueError('sandbox_projects must be a list of project IDs')
 
-    def artifact_enabled(self, project, config):
+        if type(self.static_source_builds) is not bool:
+            raise ValueError('static_source_builds must be a boolean')
+
+    def artifact_enabled(self, project, config, *, restored=False):
         selection = self.static_artifacts
         return (selection is True or (selection is not False and project in selection)) and (
-            config['runtime'] == 'static' and not config.get('build_command'))
+            config['runtime'] == 'static' and (
+                not config.get('build_command') or self.static_source_builds or restored))
 
     def sandbox_enabled(self, project, config):
         return (project in self.sandbox_projects and config['target'] == 'preview'
@@ -63,6 +68,7 @@ class Settings:
                    os.environ.get("PAAS_DOMAIN", options.get('legacy_domain','w33d.xyz')),
                    new_app_domain=os.environ.get("PAAS_NEW_APP_DOMAIN",options.get('new_app_domain')) or None,
                    static_artifacts=runtime.get('static_artifacts', False),
+                   static_source_builds=runtime.get('static_source_builds', False),
                    sandbox_projects=runtime.get('sandbox_projects', ()))
 
     @property

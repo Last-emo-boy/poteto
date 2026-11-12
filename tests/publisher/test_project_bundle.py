@@ -85,3 +85,13 @@ class BundleTests(unittest.TestCase):
             result.writestr('source.tar.gz',archive())
         self.assertTrue(unpack_bundle(self.project,self.destination).static_artifact)
         self.assertEqual(['source.tar.gz'],[p.name for p in self.destination.iterdir()])
+
+    def test_built_static_bundle_retains_output_and_original_source(self):
+        self.manifest.update(configuration={'runtime':'static','build_command':'npm run build'},
+                             resources=[],image='static-build')
+        with zipfile.ZipFile(self.project,'w') as result:
+            result.writestr('manifest.json',json.dumps(self.manifest))
+            result.writestr('source.tar.gz',archive())
+            result.writestr('static.tar.gz',archive())
+        self.assertTrue(unpack_bundle(self.project,self.destination).built_static)
+        self.assertEqual(['source.tar.gz','static.tar.gz'],sorted(p.name for p in self.destination.iterdir()))

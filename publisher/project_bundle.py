@@ -10,6 +10,7 @@ import zipfile
 from pydantic import Field,ValidationError,model_validator
 from publisher.archive import ArchiveError,unpack
 from publisher.models import DeploymentInput,EnvironmentInput,Input
+from publisher.static_artifacts import BUILT_LIMIT
 from publisher.transfer_wire import BUNDLE_LIMIT,FORMAT,BoundedZipInput,BundleError
 
 DATA_LIMIT=12*1024**3
@@ -56,7 +57,13 @@ class Manifest(Input):
 
     @property
     def static_artifact(self):
-        return self.image == 'static-artifact' and self.configuration.runtime == 'static' and not self.configuration.build_command
+        return self.built_static or (self.image == 'static-artifact' and self.configuration.runtime == 'static'
+                                     and not self.configuration.build_command)
+
+    @property
+    def built_static(self):
+        return (self.image == 'static-build' and self.configuration.runtime == 'static'
+                and bool(self.configuration.build_command))
 
 
 @contextmanager
@@ -111,6 +118,8 @@ def unpack_bundle(path,destination,*,source_stats=None):
         try:value=Manifest.model_validate_json(archive.read(manifest))
         except ValidationError:raise BundleError('Project manifest does not match the supported format') from None
         limits={'manifest.json':256*1024,'source.tar.gz':50*1024**2}
+        if value.built_static:
+            limits['static.tar.gz']=BUILT_LIMIT
         if not value.static_artifact:
             limits['image.tar']=1024**3
             if value.configuration.runtime=='static':limits['nginx.conf']=64*1024
@@ -122,7 +131,10 @@ def unpack_bundle(path,destination,*,source_stats=None):
             with archive.open(name) as source,target.open('xb') as out:
                 target.chmod(0o600);shutil.copyfileobj(source,out,1024**2)
             if target.stat().st_size!=entries[name].file_size:raise BundleError('Project bundle entry is truncated')
-    try:stats=unpack(destination/'source.tar.gz',None,max_bytes=200*1024**2,max_files=10000)
+    try:
+        stats=unpack(destination/'source.tar.gz',None,max_bytes=200*1024**2,max_files=10000)
+        if value.built_static:
+            unpack(destination/'static.tar.gz',None,max_bytes=200*1024**2,max_files=10000)
     except ArchiveError as error:raise BundleError(str(error)) from None
     if source_stats is not None:source_stats.update(stats)
     if value.resources:validate_data(destination/'data.zip',value.resources)

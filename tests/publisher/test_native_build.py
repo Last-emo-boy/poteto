@@ -66,6 +66,36 @@ class NativeBuildTests(unittest.TestCase):
         self.assertEqual((202, 'vm'), (code, receipt['driver']))
         service.assert_not_called()
 
+    def test_static_output_is_never_sent_to_the_native_builder(self):
+        (self.root / 'config.json').write_text(json.dumps(POLICY))
+        spec = SPEC | {'runtime': 'static', 'build_command': 'npm run build', 'output_kind': 'static'}
+        (code, error), service = self.submit(spec | {'require_native': True})
+        self.assertEqual((400, 'Invalid static build request'), (code, error['error']))
+        service.assert_not_called()
+        (code, receipt), service = self.submit(spec)
+        self.assertEqual((202, 'vm'), (code, receipt['driver']))
+        service.assert_called_once_with('start', f'paas-build@{JOB}.service')
+
+    def test_built_files_are_streamed_only_for_the_owned_project_and_account(self):
+        path = self.job / 'static.tar.gz'
+        path.write_bytes(b'tar-data')
+        (self.job / 'spec.json').write_text(json.dumps(SPEC))
+        (self.job / 'status.json').write_text('{"state":"succeeded","output_kind":"static","artifact_bytes":8}')
+        handler = object.__new__(host.Handler)
+        handler.authorized = Mock(return_value=True)
+        handler.path = '/v1/builds/' + JOB + '/static'
+        handler.headers = {'X-Paas-Account': ACCOUNT, 'X-Paas-Project': OTHER}
+        handler.response = Mock()
+        handler.send_response, handler.send_header, handler.end_headers = Mock(), Mock(), Mock()
+        handler.wfile = io.BytesIO()
+        handler.do_GET()
+        self.assertEqual(404, handler.response.call_args.args[0])
+        self.assertEqual(b'', handler.wfile.getvalue())
+        handler.headers['X-Paas-Project'] = PROJECT
+        handler.do_GET()
+        handler.send_response.assert_called_once_with(200)
+        self.assertEqual(b'tar-data', handler.wfile.getvalue())
+
     def test_no_public_switch_and_no_import_or_cross_account_native_build(self):
         with self.assertRaises(ValidationError):
             DeploymentInput(runtime='node', driver='native')

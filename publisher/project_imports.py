@@ -242,16 +242,19 @@ def allocate(worker,job,row,manifest,account,source_size,expanded):
                 release['state']='building';release['error']=None
             return release,json.loads(row['resource_map'])
         quota=store.check_concurrency(db,{'account_id':account})
-        used=db.execute('SELECT coalesce(sum(d.artifact_bytes+d.unpacked_bytes),0) FROM deployments d JOIN projects p ON p.id=d.project_id WHERE p.account_id=?',(account,)).fetchone()[0]
+        used = store.storage_used(db,account)
         if used+source_size+expanded>quota['max_storage']:raise Problem(429,'Artifact storage quota reached')
         config=manifest.configuration.configuration()
         if config['target']=='preview' and (config.get('database_id') or config.get('volume_id')):
             raise BundleError('A preview with data cannot become the imported production release')
         config['target']='production'
+        driver=ARTIFACT_DRIVER if manifest.static_artifact and store.settings.artifact_enabled(
+            project,config,restored=manifest.built_static) else None
+        if manifest.built_static and driver is None:
+            raise BundleError('Enable direct static artifact hosting for the destination before restoring this project')
         mapping={r.id:data.allocate(db,account,project,r.kind,r.stage,import_id=operation) for r in manifest.resources}
         for field in ['database_id','volume_id']:
             if field in config:config[field]=mapping[config[field]]
-        driver=ARTIFACT_DRIVER if manifest.static_artifact and store.settings.artifact_enabled(project,config) else None
         store.check_runtime_capacity(db,account,config,driver=driver)
         now=time.time()
         db.execute("INSERT INTO deployments(id,project_id,state,config,environment,artifact_bytes,unpacked_bytes,created,updated,runtime_driver) VALUES(?,?,'building',?,?,?,?,?,?,?)",
@@ -316,7 +319,10 @@ def apply(worker,job,row,project,stage):
         db.execute('UPDATE deployments SET environment=? WHERE id=?',(store.seal(env),operation))
         release=dict(db.execute('SELECT * FROM deployments WHERE id=?',(operation,)).fetchone())|{'app_domain':project['app_domain']}
     if release['state']!='ready':
-        worker.deploy(job,release,imported={'image_path':None if manifest.legacy_static or manifest.static_artifact else content/'image.tar','reference':manifest.image})
+        worker.deploy(job,release,imported={
+            'image_path':None if manifest.legacy_static or manifest.static_artifact else content/'image.tar',
+            'built_path':content/'static.tar.gz' if manifest.built_static else None,
+            'reference':manifest.image})
     with store.connection() as db:
         worker.guard(db)
         db.execute('UPDATE projects SET environment=?,preview_environment=? WHERE id=?',

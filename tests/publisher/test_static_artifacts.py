@@ -1,3 +1,4 @@
+from dataclasses import replace
 import io
 import json
 from pathlib import Path
@@ -6,9 +7,10 @@ import tempfile
 import unittest
 from unittest.mock import Mock, patch
 
-from publisher.backend import Dokploy
+from publisher.backend import BackendError, Dokploy
 from publisher.config import Settings
 from publisher.models import DeploymentInput
+from publisher.static_artifacts import built_archive
 from publisher.store import ARTIFACT_DRIVER, Problem, Store
 from publisher.worker import Worker
 
@@ -30,11 +32,71 @@ class StaticArtifactTests(unittest.TestCase):
         return self.store.create_deployment(self.actor, self.project, config, None)
 
     def archive(self, deployment, files):
-        with tarfile.open(self.root / 'artifacts' / (deployment['id'] + '.tar.gz'), 'w:gz') as tar:
+        self.write_tar(self.root / 'artifacts' / (deployment['id'] + '.tar.gz'), files)
+
+    @staticmethod
+    def write_tar(path, files):
+        with tarfile.open(path, 'w:gz') as tar:
             for name, content in files.items():
                 item = tarfile.TarInfo(name)
                 item.size = len(content)
                 tar.addfile(item, io.BytesIO(content))
+
+    def source_deployment(self):
+        settings = replace(self.store.settings, static_source_builds=True)
+        self.store = self.backend.store = Store(settings)
+        self.backend.settings = settings
+        return self.deployment(build_command='npm run build', output_directory='dist')
+
+    def test_source_build_retains_only_validated_output_and_releases_builder_receipt(self):
+        release = self.source_deployment()
+        self.assertEqual(ARTIFACT_DRIVER, release['runtime_driver'])
+        rid = release['id']
+        archive = self.root/'generated.tar.gz'
+        self.write_tar(archive, {'index.html': b'<p>generated</p>'})
+        data = archive.read_bytes()
+        client = Mock()
+        client.build_status.return_value = {'state': 'succeeded', 'driver': 'vm',
+                                            'output_kind': 'static', 'artifact_bytes': len(data)}
+        client.build_logs.return_value = ''
+        client.stream_export.side_effect = lambda method, path, out, limit, check, **kw: out.write(data)
+        with (patch.object(self.backend, 'execution_client', return_value=client),
+              patch('publisher.runtime.RuntimeRegistry') as vm):
+            self.backend.publish_artifact(release, self.root/'input.tar.gz', Mock(), log=Mock())
+            self.assertEqual(len(data), built_archive(self.store.settings, rid).stat().st_size)
+            self.assertEqual(b'<p>generated</p>', (self.root/'static-releases'/rid/'index.html').read_bytes())
+            with self.store.connection() as db:
+                self.assertEqual(len(data)+16, db.execute("SELECT built_bytes FROM deployments WHERE id=?", (rid,)).fetchone()[0])
+                self.assertEqual(0, db.execute("SELECT count(*) FROM execution_targets").fetchone()[0])
+            self.assertEqual('/v1/builds/'+rid+'/static', client.stream_export.call_args.args[1])
+            self.assertEqual(self.project, client.stream_export.call_args.kwargs['headers']['X-Paas-Project'])
+            self.assertEqual(['cancel', 'delete'], [call.args[-1] for call in client.build_operation.call_args_list])
+            vm.assert_not_called()
+            client.reset_mock()
+            self.backend.publish_artifact(release | {'backend_id': ARTIFACT_DRIVER},
+                                          self.root/'input.tar.gz', Mock(), log=Mock())
+            self.assertEqual([], client.mock_calls)
+
+    def test_restored_build_needs_no_executor_and_quota_failure_never_creates_route(self):
+        release = self.source_deployment()
+        rid = release['id']
+        archive = self.root/'restored.tar.gz'
+        self.write_tar(archive, {'index.html': b'<p>generated</p>'})
+        route = self.root/('publisher-preview-'+rid+'.yml')
+        with self.store.connection() as db:
+            db.execute("UPDATE accounts SET max_storage=1 WHERE id=?", (self.actor['account_id'],))
+        with patch.object(self.backend, 'execution_client') as executor:
+            with self.assertRaisesRegex(BackendError, 'storage quota'):
+                self.backend.publish_artifact(release, self.root/'source', Mock(), restored=archive)
+            self.assertFalse(route.exists())
+            self.assertFalse(built_archive(self.store.settings, rid).exists())
+            with self.store.connection() as db:
+                db.execute("UPDATE accounts SET max_storage=4096 WHERE id=?", (self.actor['account_id'],))
+            self.backend.publish_artifact(release, self.root/'source', Mock(), restored=archive)
+            self.assertTrue(route.is_file())
+            self.backend.remove(release | {'backend_id': ARTIFACT_DRIVER})
+            self.assertFalse(built_archive(self.store.settings, rid).exists())
+            executor.assert_not_called()
 
     def test_pins_driver_and_uses_no_vm_reservation(self):
         static = self.deployment(cpus=1)

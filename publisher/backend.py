@@ -9,7 +9,7 @@ import urllib.request
 from pathlib import Path
 from publisher.container_logs import capture
 from publisher import static_artifacts
-from publisher.store import ARTIFACT_DRIVER, SANDBOX_DRIVER
+from publisher.store import ARTIFACT_DRIVER, SANDBOX_DRIVER, Problem
 
 
 class BackendError(RuntimeError):
@@ -168,10 +168,62 @@ class Dokploy:
     def reconcile_release(self, deployment):
         self.deploy(deployment, deployment['backend_id'])
 
-    def publish_artifact(self, deployment, archive, check):
-        static_artifacts.stage(self.settings, deployment, archive, check)
+    def publish_artifact(self, deployment, archive, check, *, log=None, restored=None):
+        config = json.loads(deployment['config'])
+        if config.get('build_command'):
+            self.stage_built_artifact(deployment, config, archive, log, check, restored)
+        else:
+            static_artifacts.stage(self.settings, deployment, archive, check)
         check()
         self.write_route(deployment, static_artifacts.UPSTREAM)
+
+    def stage_built_artifact(self, deployment, config, source, log, check, restored):
+        release_id, project = deployment['id'], deployment['project_id']
+        cache = static_artifacts.built_archive(self.settings, release_id)
+        account_id = self.account(deployment)
+        cached = cache.is_file()
+        pending = cache.with_suffix(".next")
+        try:
+            archive = cache if cached else pending
+            if not cached:
+                if restored is None and self.config.get('execution_enabled') is not True:
+                    raise BackendError('Connect the isolated source builder or upload prebuilt static files')
+                if static_artifacts.path_for(self.settings, release_id).exists():
+                    raise BackendError('The built archive is missing for the existing static release')
+                needed = self.settings.unpack_limit + static_artifacts.BUILT_LIMIT + 1024**3
+                if shutil.disk_usage(self.settings.root).free < needed:
+                    raise BackendError('Not enough disk space to publish the built static files')
+                cache.parent.mkdir(mode=0o700, exist_ok=True)
+                pending.unlink(missing_ok=True)
+                if restored is not None:
+                    shutil.copyfile(restored, pending)
+                else:
+                    result = self.build_output(deployment, config, source, account_id, log, check, static=True)
+                    with pending.open('xb') as output:
+                        size = self.execution_client().stream_export(
+                            'GET', '/v1/builds/' + release_id + '/static', output,
+                            static_artifacts.BUILT_LIMIT, check,
+                            headers={'X-Paas-Account': account_id, 'X-Paas-Project': project})
+                    if size != result['artifact_bytes']:
+                        raise BackendError('Built static archive does not match the executor receipt')
+                pending.chmod(0o600)
+            size = archive.stat().st_size
+            if not 0 < size <= static_artifacts.BUILT_LIMIT:
+                raise BackendError('Built static archive exceeds its compressed size limit')
+
+            def retain(stats):
+                try:
+                    self.store.reserve_built_artifact(release_id, size + stats['unpacked_bytes'])
+                except Problem as error:
+                    raise BackendError(error.message) from None
+                if not cached:
+                    pending.replace(cache)
+
+            static_artifacts.stage(self.settings, deployment, archive, check, built=True, before_publish=retain)
+        finally:
+            pending.unlink(missing_ok=True)
+        if restored is None and deployment.get('backend_id') != ARTIFACT_DRIVER:
+            self.cleanup_build(account_id, release_id)
 
     def account(self, deployment):
         with self.store.connection() as db:
@@ -185,7 +237,7 @@ class Dokploy:
         config = json.loads(deployment['config'])
         if not self.settings.sandbox_enabled(deployment['project_id'], config):
             raise BackendError('This project is no longer enabled for sandbox previews')
-        self.build_image(deployment, config, archive, self.account(deployment), log, check, native_only=True)
+        self.build_output(deployment, config, archive, self.account(deployment), log, check, native_only=True)
         port = config['port']
         record = self.sandbox_action(deployment, 'start', port=port, memory_mb=config['memory_mb'],
                                      cpus=config['cpus'], environment=self.runtime_environment(deployment, port))
@@ -303,6 +355,10 @@ class Dokploy:
     def remove(self, deployment):
         if deployment.get('runtime_driver') == ARTIFACT_DRIVER:
             self.remove_preview_route(deployment['id'])
+            if (json.loads(deployment['config']).get('build_command')
+                    and deployment.get('backend_id') != ARTIFACT_DRIVER
+                    and self.config.get('execution_enabled') is True):
+                self.cleanup_build(self.account(deployment), deployment['id'])
             static_artifacts.remove(self.settings, deployment['id'])
             return
         if deployment.get('runtime_driver') == SANDBOX_DRIVER:
@@ -343,6 +399,11 @@ class Dokploy:
 
     def cancel(self, deployment):
         self.remove(deployment)
+
+    def cleanup_build(self, account_id, release_id):
+        client = self.execution_client()
+        client.build_operation(account_id, release_id, 'cancel')
+        client.build_operation(account_id, release_id, 'delete')
 
     def remove_preview_route(self, deployment_id):
         path = Path(self.config.get('routes', '/etc/dokploy/traefik/dynamic')) / ('publisher-preview-' + deployment_id + '.yml')
@@ -419,7 +480,7 @@ class Dokploy:
             client.action(target['account_id'], deployment['id'], 'restore_alias', project_id=deployment['project_id'], target_release=previous)
             raise
 
-    def build_image(self, deployment, config, archive, account_id, log, check, *, imported=None, native_only=False):
+    def build_output(self, deployment, config, archive, account_id, log, check, *, imported=None, native_only=False, static=False):
         from publisher.executor import BuildOutput
         client = self.execution_client()
         if check:
@@ -436,6 +497,8 @@ class Dokploy:
                 build={'runtime':'image-import','image_reference':imported['reference']};archive=imported['image_path']
             if native_only:
                 build['require_native'] = True
+            if static:
+                build['output_kind'] = 'static'
             status = client.start_build(deployment['id'], build | {'account_id': account_id, 'project_id': deployment['project_id']}, archive)
         if native_only and status.get('driver') != 'native':
             raise BackendError('Sandbox preview requires a trusted native build')
@@ -459,6 +522,8 @@ class Dokploy:
                 log(line)
         if status['state'] != 'succeeded':
             raise BackendError(status.get('error', 'Isolated build failed'))
+        if static and (status.get('driver'), status.get('output_kind')) != ('vm', 'static'):
+            raise BackendError('Isolated builder did not return static files')
         if check:
             check()
         return status
@@ -476,7 +541,7 @@ class Dokploy:
         with self.store.connection() as db:
             db.execute('INSERT INTO execution_targets VALUES(?,?,?,?,?) ON CONFLICT(deployment_id) DO NOTHING',
                        (deployment['id'], account_id, record['server_id'], record['http_port'], time.time()))
-        status = self.build_image(deployment, config, archive, account_id, log, check, imported=imported)
+        status = self.build_output(deployment, config, archive, account_id, log, check, imported=imported)
         client = self.execution_client()
         client.load_image(account_id, deployment['id'])
         from publisher.data_backend import DataBackend

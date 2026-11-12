@@ -15,7 +15,8 @@ from publisher.backend import BackendError
 from publisher.data_store import DataStore
 from publisher.models import Input
 from publisher.project_bundle import BUNDLE_LIMIT,FORMAT
-from publisher.store import Problem, ident
+from publisher.static_artifacts import BUILT_LIMIT, built_archive
+from publisher.store import ARTIFACT_DRIVER, Problem, ident
 
 AGE=Path('/opt/paas-publisher/age')
 LIMIT=BUNDLE_LIMIT
@@ -171,10 +172,16 @@ def execute(worker,job,release):
                 raise BackendError('Invalid age public recipient')
             source=store.settings.root/'artifacts'/(release['id']+'.tar.gz')
             if not source.is_file():raise BackendError('Published release source is unavailable')
-            artifact_driver=release.get('runtime_driver')=='static-artifact'
+            config=json.loads(release['config'])
+            artifact_driver=release.get('runtime_driver')==ARTIFACT_DRIVER
+            built=None
             target=None if artifact_driver else backend.target(release['id']);account=project['account_id']
             if artifact_driver:
-                image='static-artifact'
+                image='static-build' if config.get('build_command') else 'static-artifact'
+                if image=='static-build':
+                    built=built_archive(store.settings,release['id'])
+                    if not built.is_file() or not 0<built.stat().st_size<=BUILT_LIMIT:
+                        raise BackendError('Published static build archive is unavailable')
             elif target:
                 if target['account_id']!=account:raise BackendError('Release image ownership does not match')
                 image='paas-release:'+release['id']
@@ -182,7 +189,6 @@ def execute(worker,job,release):
                 current=backend.find_container(release['id'])
                 image=current.get('Image') if current else None
                 if not image or not re.fullmatch(r'sha256:[a-f0-9]{64}',image):raise BackendError('Legacy release image is unavailable')
-            config=json.loads(release['config'])
             manifest={'format':FORMAT,'bundle_id':operation,'name':project['name'],'source_release':release['id'],
                 'image':image,'configuration':config,'project_environment':store.unseal(project['environment']),
                 'release_environment':{k:v for k,v in store.unseal(release['environment']).items() if k not in MANAGED},'resources':resources}
@@ -197,6 +203,7 @@ def execute(worker,job,release):
                     with zipfile.ZipFile(BoundedOutput(process.stdin),'w') as bundle:
                         bundle.writestr('manifest.json',json.dumps(manifest,ensure_ascii=False))
                         bundle.write(source,'source.tar.gz')
+                        if built:bundle.write(built,'static.tar.gz')
                         if not artifact_driver:
                             if config['runtime']=='static':bundle.write(Path(__file__).with_name('static-nginx.conf'),'nginx.conf')
                             with bundle.open('image.tar','w',force_zip64=True) as out:
