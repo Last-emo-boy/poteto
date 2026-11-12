@@ -21,8 +21,8 @@ class Settings:
     static_artifacts: bool | tuple[str, ...] = False
     static_source_builds: bool = False
     sandbox_projects: tuple[str, ...] = ()
-    sandbox_sleep_projects: tuple[str, ...] = ()
     prebuilt_image_projects: tuple[str, ...] = ()
+    sandbox_sleep_projects: tuple[str, ...] = ()
 
     def __post_init__(self):
         if not valid_domain(self.domain):
