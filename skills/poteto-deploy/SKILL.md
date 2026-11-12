@@ -1,15 +1,15 @@
 ---
 name: poteto-deploy
-description: 用 Poteto CLI 把现有应用目录预检并发布到 Poteto 的 HTTPS 预览。适用于用户指定 Poteto 的静态站、Node 应用、Dockerfile 项目，以及已绑定预览数据库或卷的动态应用。
+description: 用 Poteto CLI 把现有应用目录预检并发布到 Poteto 的 HTTPS 预览或用户明确授权的正式版本。适用于用户指定 Poteto 的静态站、Node 应用、Dockerfile 项目，以及已绑定预览数据库或卷的动态应用。
 ---
 
-# 用 Poteto 发布预览
+# 用 Poteto 发布应用
 
-目标是交付一个已通过检查的 HTTPS 预览链接。使用用户选定的应用目录和 Poteto 项目；不要为了发布重排项目，也不要改动生产发布、域名或数据资源。
+默认交付一个已通过检查的 HTTPS 预览链接；只有用户明确要求正式发布时，才使用下方生产流程。使用用户选定的应用目录和 Poteto 项目；不要为了发布重排项目，也不要擅自改动生产发布、域名或数据资源。
 
 ## 安装与凭据
 
-如果没有可用的 Poteto 0.16.1 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
+如果没有可用的 Poteto 0.17.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
 
 ```sh
 curl -fsSL https://poteto.iflink.tech/install.sh | sh
@@ -24,7 +24,7 @@ irm https://poteto.iflink.tech/install.ps1 | iex
 默认可执行文件：macOS/Linux 为 `$HOME/.local/bin/poteto`；Windows 为 `$env:LOCALAPPDATA\Programs\Poteto\bin\poteto.cmd`，安装器会添加用户 PATH。运行 `poteto --version` 确认可用。
 
 - 用户可用 `poteto login` 在浏览器完成 IF.Link 登录。使用指定的凭据文件时，通过 `POTETO_TOKEN_FILE` 传入路径。不要索要或输出 token 内容，不要将凭据复制到上传目录。
-- 用 `poteto doctor` 核对项目和权限。仅接受有目标项目预览权限的凭据；不要为自动化改用管理员凭据或自行扩大权限。使用项目级手动 token 时，部署命令加 `--project "$PROJECT_ID"`。IF.Link 登录凭据已绑定项目时可省略。
+- 用 `poteto doctor` 核对项目和权限。仅接受有目标项目和所需环境权限的凭据；不要为自动化改用管理员凭据或自行扩大权限。使用项目级手动 token 时，部署命令加 `--project "$PROJECT_ID"`。IF.Link 登录凭据已绑定项目时可省略。
 - 重复使用同一目录时，可运行 `poteto link "$APP_DIR" --project "$PROJECT_ID"` 保存项目与 API 地址；`.poteto/` 不保存 token，也不会上传。`poteto unlink "$APP_DIR"` 只解除本地绑定，不删除服务器项目。
 
 ## 预检 → 预览 → 验证
@@ -58,7 +58,7 @@ poteto deploy "$APP_DIR" --prebuilt --project "$PROJECT_ID" --preview --url-only
 
 只在 `deploy` 成功且返回的 HTTPS 地址可访问后，才交付预览链接。验证首页或应用实际配置的健康检查路径；验证共享数据时优先使用只读请求。不要把 token 或环境变量值放进回复。
 
-后续用 `poteto inspect <预览 URL>` 查看同一个部署，用 `poteto logs <预览 URL>` 查看日志，加 `--follow` 可在构建过程中持续查看输出，用 `poteto ls` 列出当前项目发布。此技能始终使用 `--preview`；不得为了绕过预览权限改用 `--prod`。
+后续用 `poteto inspect <预览 URL>` 查看同一个部署，用 `poteto logs <预览 URL>` 查看日志，加 `--follow` 可在构建过程中持续查看输出，用 `poteto ls` 列出当前项目发布。预览任务始终使用 `--preview`；不得为了绕过预览权限改用 `--prod`。明确要求正式发布时使用下方流程。
 
 Next.js / Vite 项目可在预检和部署时同时加 `--preset nextjs` / `--preset vite`，或在 `poteto.json` 指定 `preset`。保留已有目录和锁文件。只有用户明确选择服务器源码构建时，才省略 `--local-build`。预览变量操作需用户已授予的 `previews:env` 或管理凭据 `env:write`，不要擅自扩权；`poteto redeploy <预览 URL> --preview --url-only` 使用已保存的构建方式，预构建镜像复用成品，源码发布会在服务器重建。请求中断时沿用 stderr 中的 `--request-id`，不要重新生成请求。
 
@@ -103,3 +103,21 @@ poteto import create "$EMPTY_PROJECT_ID" /secure/preview.zip.age --identity /sec
 接收方必须是已授权的空个人预览项目。身份私钥和加密包放在上传目录之外；不要输出私钥、环境值或数据库内容。导入会创建新数据库绑定，保留原数据并跳过已应用迁移。访问导入后的页面验证实际数据，同时确认源应用未改变；不能只凭任务完成就宣称恢复成功。
 
 导入失败先检查状态。用户同意放弃该导入后，可用 `poteto import delete "$IMPORT_ID" --destroy-data` 清理仅由它创建的资源，保持目标项目可复用。中断后重试同一操作，不扩大删除范围。
+
+
+## 用户明确要求正式发布时
+
+先用 `poteto doctor` 确认 `capabilities.production.enabled` 与 `authorized`，并核对目标项目。没有权限时请用户选择是否以 `poteto login --production --output /secure/production.json` 单独授权，不自行重新登录或换用管理员 token。生产凭据允许该项目的发布、回滚、清理非当前版本以及配置中显式申请的外网访问；环境、数据库、备份和项目删除另需用户明确选择 `--manage-project`。它不授予账号管理、其他项目或 token 签发权。生产模式不能混用预览专用登录选项；保留原预览 Agent 凭据。
+
+沿用前面本地构建或预构建成品的流程，只将目标改为 `--prod`。例如：
+
+```sh
+poteto plan "$APP_DIR" --prebuilt-image "$IMAGE_ARCHIVE" --remote --project "$PROJECT_ID" --prod --json
+poteto deploy "$APP_DIR" --prebuilt-image "$IMAGE_ARCHIVE" --project "$PROJECT_ID" --prod --url-only
+```
+
+静态成品使用 `--prebuilt`。确认健康检查成功，再验证返回的稳定生产 URL；`deploy --prod --url-only` 返回的是生产地址，不要误交付不可变版本地址。只在用户要求回滚时执行 `poteto rollback "$RELEASE_ID" --project "$PROJECT_ID"`，随后验证同一个生产地址。回滚只切流量，不回滚数据库，不擅自删除保留版本。
+
+预览数据库不能用于生产配置。用户需要生产数据库时，用已授权管理凭据执行 `database create --stage production`，等待就绪后绑定新的 ID。预览含数据库或两边环境变量不同，就重新发布生产版本，不直接 promote。迁移必须兼容旧版本；破坏性 SQL 需要单独确认。应用可以休眠，但数据库仍保留运行和数据。
+
+备份正式项目时，`export create PROJECT --recipient AGE_PUBLIC_KEY` 不加 `--deployment`；正式恢复用 `import create EMPTY_PROJECT BUNDLE --identity KEY`，不加 `--preview`。需要已授权的项目管理凭据；正式包可能包含两种环境的变量与数据库，应按敏感数据保护。恢复到空项目并验证数据后才交付地址，不覆盖已有生产项目。

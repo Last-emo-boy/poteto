@@ -51,6 +51,15 @@ class SandboxWakeTests(unittest.TestCase):
         sandbox_wake.configure(self.root, {}, Mock())
         self.assertIn('reverse_proxy', live.read_text())
 
+    def test_production_host_is_restored_only_inside_the_selected_release_route(self):
+        record = self.record | {'project_id':'b'*24}
+        value = sandbox_wake.configuration([(self.release, record)])
+        production = 'app-' + 'b'*24 + '.apps.example'
+        self.assertIn('header X-Forwarded-Host ' + production, value)
+        self.assertIn('request_header @p' + self.release + ' Host ' + production, value)
+        self.assertLess(value.index('handle @r'), value.index('request_header @p'))
+        self.assertIn('host ' + self.wake['hostname'], value)
+
     def test_retired_port_is_held_until_old_blocking_requests_expire(self):
         with patch.object(sandbox_wake, 'boot_id', return_value='boot'), patch.object(sandbox_wake.time, 'monotonic', return_value=10):
             sandbox_wake.quarantine(self.root, 23000)

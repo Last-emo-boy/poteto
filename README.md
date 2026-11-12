@@ -208,13 +208,33 @@ In the IF.Link login configuration pointed to by `PAAS_OIDC_CONFIG_FILE`, set `"
 
 On a provisioned executor, set `personal_previews: true` in both the publisher runtime configuration and the executor configuration. **New** IF.Link enrollments then receive an `isolated` personal project. Existing projects and releases retain their original mode. `poteto doctor` exposes the selected project's capabilities, and remote preflight returns the effective configuration.
 
-Personal projects accept locally built static output and prebuilt `linux/amd64` preview images. With the native database provider below, images can also use preview PostgreSQL and migrations. They do not run source builds, allocate persistent volumes, import production bundles, or silently fall back to a VM. Images default to 256 MiB, 0.1 vCPU and idle sleep; explicitly supplied resources and sleep settings are preserved. Outbound access is off unless both the token and deployment opt into web egress. Production image deployment remains on existing managed projects.
+Personal projects accept locally built static output and prebuilt `linux/amd64` preview images. With the native database provider below, images can also use preview PostgreSQL and migrations. They do not run source builds, allocate persistent volumes, import production bundles, or silently fall back to a VM. Images default to 256 MiB, 0.1 vCPU and idle sleep; explicitly supplied resources and sleep settings are preserved. Outbound access is off unless both the token and deployment opt into web egress. Personal production images use the explicit opt-in below; existing managed projects retain their production path.
 
 The shared pool has 64 private ingress slots. Its default remains 2 GiB / 1.5 vCPU. To change it, set the same `sandbox_memory_limit_mib` and `sandbox_cpu_limit` in publisher and executor configurations, and apply matching `MemoryMax`, `MemorySwapMax=0` and `CPUQuota` values to `paas-sandbox.slice`. The executor checks effective cgroup limits and stored reservations before admitting a personal preview. Keep headroom for the controller, existing tenant VMs and the host; do not size this pool from currently free RAM alone. The controller's persistent loopback filter and executor egress policy must allow `23000–23063` and the wake proxy at `23100`.
 
 To enable web egress on an existing installation, deploy `execution/sandbox_network.py` and the updated `paas-sandbox-network.service`, then set `sandbox_web: true` in both publisher and executor configurations. The network service reconciles its own nftables table from persisted sandbox receipts on restart. Set `sandbox_dns` in the executor to one to three reachable public IPv4 resolvers when the defaults are unsuitable. Web previews mount a platform-owned, read-only resolver file rather than using Docker’s loopback DNS; recreate web previews after changing that resolver list. Use `systemctl reload paas-sandbox-network.service` to reconcile changed rules without restarting the wake proxy. Disabling the switch and reloading that service withdraws web access; it does not grant a less isolated fallback or change application ingress. Existing offline receipts stay offline. Keep the older static `paas-sandbox.nft` only as a deny-all fallback, not as the web-enabled service's entry point.
 
 A stopped preview retains its reservation so simultaneous wake-ups cannot overbook the pool. The per-project cleanup and usage commands help reclaim old reservations; a high project count does not imply that every project can run a large dynamic application concurrently.
+
+### Publish a personal project to a stable production URL
+
+When the platform enables personal production, request a separate production credential explicitly:
+
+```sh
+poteto login --production --output /secure/poteto-production.json
+export POTETO_TOKEN_FILE=/secure/poteto-production.json
+poteto deploy . --local-build --prod --url-only
+```
+
+The returned production URL stays the same across releases. Static output uses shared hosting; prebuilt images stay in gVisor without a tenant VM. A release must pass health checks before traffic switches. `poteto rollback RELEASE_ID` restores a retained healthy release without rebuilding it. It changes traffic, not database contents; migrations must remain compatible with the previous application version.
+
+A production login grants this project's deployment read/write operations, including promotion, rollback, non-current release cleanup and explicitly configured web egress. It does not grant environment editing, data management, account administration or token issuance. Add `--manage-project` only when you need to manage the project's environments, databases, encrypted backups or deletion. That credential can manage both stages. Preview-only login flags cannot be combined with production login; keep the preview Agent credential in its own file.
+
+For persistent production data, use the management credential to create `poteto database create --stage production`, then bind that database in the production deployment configuration. Preview and production databases have different IDs and credentials. A data-bound preview cannot be promoted into production; publish with `--prod` and the production binding instead. Likewise, use a new production deployment when environment settings differ. Production images may sleep just like previews; set `sleep: false` explicitly if the application needs to remain running, within the same resource budget.
+
+Full production backups use `poteto export create PROJECT_ID --recipient AGE_PUBLIC_KEY` without `--deployment`. Restore into an empty enabled personal project with `poteto import create PROJECT_ID BUNDLE --identity KEY` without `--preview`. The production bundle includes both stages' project environment and database resources; protect the recipient key accordingly. Native restore preserves the schema and skips its already-applied migration.
+
+Operators enable this path with `personal_production: true` in the publisher runtime configuration, alongside `personal_previews` and, for databases, `native_databases`. Existing managed projects, credentials and VM routes retain their original contract. Turning the flag off stops new personal production logins and image/data/import operations; it does not revoke issued credentials or withdraw an already running route.
 
 ### Preview PostgreSQL without a tenant VM
 

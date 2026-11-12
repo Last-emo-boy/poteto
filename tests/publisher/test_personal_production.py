@@ -111,6 +111,7 @@ class PersonalProductionTests(unittest.TestCase):
         backend = Dokploy({'routes':str(self.root), 'releases':str(self.root/'releases')}, self.settings)
         backend.store = self.store
         backend.health = Mock(); backend.target = Mock(return_value=None); backend.public_health = Mock()
+        backend.sandbox_action = Mock(return_value={'http_port':23100})
         connection = Mock(); connection.getresponse.return_value.status = 200
         connection.getresponse.return_value.getheader.return_value = release['id']
         with patch('publisher.backend.http.client.HTTPConnection', return_value=connection):
@@ -118,6 +119,8 @@ class PersonalProductionTests(unittest.TestCase):
         route = self.root / ('publisher-' + self.project + '.yml')
         value = json.loads(route.read_text()); key = 'publisher-host-' + self.project
         self.assertEqual(backend.hostname(row), value['http']['middlewares'][key]['headers']['customRequestHeaders']['Host'])
+        self.assertEqual(backend.hostname(row, production=True), value['http']['middlewares'][key]['headers']['customRequestHeaders']['X-Forwarded-Host'])
+        self.assertEqual('http://10.201.0.2:23100', value['http']['services']['publisher-' + self.project]['loadBalancer']['servers'][0]['url'])
         previous = route.read_bytes(); backend.public_health.side_effect = BackendError('origin unavailable')
         with patch('publisher.backend.http.client.HTTPConnection', return_value=connection), self.assertRaises(BackendError):
             backend.promote(row)

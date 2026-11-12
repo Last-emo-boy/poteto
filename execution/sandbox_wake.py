@@ -42,7 +42,18 @@ def configuration(records, idle_seconds=120):
         if host in hosts:
             raise ValueError("Duplicate sandbox wake host")
         hosts.add(host)
-        lines += [f" @r{release} host {host}", f" handle @r{release} {{", "  route {",
+        production = None
+        if record.get('project_id'):
+            if not re.fullmatch(r'[a-f0-9]{24}', record['project_id']):
+                raise ValueError('Invalid sandbox project identity')
+            production = 'app-' + record['project_id'] + '.' + host.split('.', 1)[1]
+            lines += [f' @p{release} header X-Forwarded-Host {production}']
+        lines += [f" @r{release} host {host}", f" handle @r{release} {{", "  route {"]
+        if production:
+            # The controller fixes this header to its matched public route.
+            # Rewrite only after selecting the immutable release's wake group.
+            lines += [f'   request_header @p{release} Host {production}']
+        lines += [
                   "   sablier http://127.0.0.1:23101 {", f"    group poteto-sbx-{release}",
                   f"    session_duration {idle_seconds}s", "    blocking {", "     timeout 60s", "    }", "   }",
                   f"   reverse_proxy 127.0.0.1:{record['host_port']} {{",

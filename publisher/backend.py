@@ -322,7 +322,7 @@ class Dokploy:
             return self.promote_remote(deployment)
         self.health(deployment)
         project_id = deployment["project_id"]
-        # Point production at the immutable preview host. That path retains Sablier's wake handling.
+        # Keep the immutable release and its Sablier wake handling.
         document = {"http": {"routers": {"publisher-" + project_id: {
             "rule": f"Host(`{self.hostname(deployment,production=True)}`)", "entryPoints": ["web"],
             "service": "publisher-" + project_id}},
@@ -332,6 +332,14 @@ class Dokploy:
         # Override the upstream Host with the preview host, avoiding a recursive production route.
         preview = self.hostname(deployment)
         document["http"]["middlewares"]["publisher-host-" + project_id] = {"headers": {"customRequestHeaders": {"Host": preview}, "customResponseHeaders": {"X-Paas-Deployment": deployment["id"]}}}
+        if deployment.get('runtime_driver') == SANDBOX_DRIVER:
+            target = self.sandbox_action(deployment, 'inspect')
+            document['http']['services']['publisher-' + project_id]['loadBalancer']['servers'] = [
+                {'url':'http://10.201.0.2:' + str(target['http_port'])}]
+            headers = {'X-Forwarded-Proto':'https', 'X-Forwarded-Host':self.hostname(deployment, production=True)}
+            if json.loads(deployment['config'])['sleep']:
+                headers['Host'] = preview
+            document['http']['middlewares']['publisher-host-' + project_id]['headers']['customRequestHeaders'] = headers
         document["http"]["routers"]["publisher-" + project_id]["middlewares"] = ["publisher-host-" + project_id]
         # Traefik runs in Docker: its own port 80 is the internal loopback listener.
         live = Path(self.config.get("routes", "/etc/dokploy/traefik/dynamic")) / ("publisher-" + project_id + ".yml")
