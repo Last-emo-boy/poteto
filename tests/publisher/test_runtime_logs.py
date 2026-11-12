@@ -188,6 +188,7 @@ class RuntimeLogTests(unittest.TestCase):
 
     def test_sandbox_logs_use_timestamped_bounded_capture_without_starting(self):
         account,project='a'*24,'b'*24
+        (self.root/'sandboxes').mkdir()
         sandbox.save(self.root/'sandboxes'/(self.release+'.json'),{'account_id':account,'project_id':project,'host_port':23000})
         body={'action':'logs','account_id':account,'project_id':project}
         current={'Config':{'Labels':sandbox.labels(self.release,account,project)},'State':{'Running':False}}
@@ -199,6 +200,7 @@ class RuntimeLogTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'log collection failed'):sandbox.operation(self.root,{},self.release,body,Mock())
 
     def test_sandbox_refuses_foreign_ownership_before_log_capture(self):
+        (self.root/'sandboxes').mkdir()
         sandbox.save(self.root/'sandboxes'/(self.release+'.json'),{'account_id':'a'*24,'project_id':'b'*24,'host_port':23000})
         with patch('publisher.container_logs.capture') as read,self.assertRaisesRegex(ValueError,'does not belong'):
             sandbox.operation(self.root,{},self.release,{'action':'logs','account_id':'c'*24,'project_id':'b'*24},Mock())
