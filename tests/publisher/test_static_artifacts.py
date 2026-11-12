@@ -64,7 +64,8 @@ class StaticArtifactTests(unittest.TestCase):
         response.getheader.return_value = release['id']
         with (patch.object(self.backend, 'execution_client') as executor,
               patch.object(self.backend, 'api') as dokploy,
-              patch('publisher.backend.http.client.HTTPConnection') as http):
+              patch('publisher.backend.http.client.HTTPConnection') as http,
+              patch('publisher.backend.http.client.HTTPSConnection', new=http)):
             http.return_value.getresponse.return_value = response
             self.worker.deploy({}, release)
             with self.store.connection() as db:
@@ -95,7 +96,8 @@ class StaticArtifactTests(unittest.TestCase):
         response = Mock(status=200)
         with (patch.object(self.backend, 'execution_client') as executor,
               patch.object(self.backend, 'api') as dokploy,
-              patch('publisher.backend.http.client.HTTPConnection') as http):
+              patch('publisher.backend.http.client.HTTPConnection') as http,
+              patch('publisher.backend.http.client.HTTPSConnection', new=http)):
             http.return_value.getresponse.return_value = response
             for index in range(50):
                 actor = self.store.authenticate(self.store.create_account(f'tenant-{index}')['token'])
