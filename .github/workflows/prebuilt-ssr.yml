@@ -1,0 +1,31 @@
+name: Prebuilt SSR acceptance
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'fixtures/next-postgres/**'
+      - 'tests/linux/test-next-postgres.sh'
+      - '.github/workflows/prebuilt-ssr.yml'
+permissions:
+  contents: read
+jobs:
+  next-postgres:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e . httpx==0.28.1
+      - name: Build, measure and run the real SSR image
+        run: bash tests/linux/test-next-postgres.sh "$RUNNER_TEMP/ssr-output"
+      - name: Preserve the build for origin acceptance
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: next-postgres-prebuilt
+          path: ${{ runner.temp }}/ssr-output/
+          retention-days: 1
+          compression-level: 0
+          if-no-files-found: error

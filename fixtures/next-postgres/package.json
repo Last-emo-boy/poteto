@@ -1,0 +1,15 @@
+{
+  "name": "poteto-next-postgres",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "next build --webpack",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "next": "16.4.6",
+    "pg": "8.23.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1"
+  }
+}

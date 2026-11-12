@@ -1,0 +1,9 @@
+*
+!app
+!app/**
+!lib
+!lib/**
+!package.json
+!package-lock.json
+!next.config.mjs
+!migrate.mjs

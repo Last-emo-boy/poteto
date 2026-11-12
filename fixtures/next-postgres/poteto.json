@@ -1,0 +1,7 @@
+{
+  "runtime": "image",
+  "health_check": "/api/healthz",
+  "migration_command": "node migrate.mjs",
+  "memory_mb": 512,
+  "cpus": 0.5
+}
