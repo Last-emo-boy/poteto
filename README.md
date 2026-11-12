@@ -67,6 +67,16 @@ Changes apply to the runtime of new deployments. `redeploy` rebuilds the origina
 
 The CLI prints a request ID to stderr. If a request is interrupted, repeat with `--request-id THE_SAME_ID` to resume the same candidate rather than creating another. `--no-wait` returns the queued candidate; `inspect` and `logs` can observe it later. `retry` remains the command for resuming a failed candidate in place.
 
+## Build static sites locally or in CI
+
+```sh
+poteto build . --preset vite
+poteto plan . --prebuilt --json
+poteto deploy . --prebuilt --preview --url-only
+```
+
+`build` runs trusted npm projects' locked install and configured build locally, then packages only the static output into `.poteto/output.tar.gz`. Plain HTML can be packaged without npm. Pass custom `--config` or `--preset` to `build`, not to `deploy --prebuilt`. Copy the archive to the same relative path in a separate CI publish job if needed. Prebuilt deployments default to preview; production still requires `--prod` and a production-capable credential. This path is for static output, including a completed Next.js static export; SSR and APIs continue to use the existing runtime paths.
+
 ## Framework presets
 
 ```sh

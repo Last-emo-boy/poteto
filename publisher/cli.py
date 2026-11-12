@@ -20,6 +20,7 @@ if __package__:
     from .cli_login import default_token_file, login, logout
     from .cli_tools import VERSION, PlanError, deployment_config, initialize, pack, plan_deployment
     from .cli_project import deployment_reference, find_link, unlink, write_link
+    from .cli_prebuilt import build_static, read_prebuilt
     from .login_contract import DEFAULT_URL, LOGIN_PATH
     from .transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
 else:
@@ -208,8 +209,11 @@ def _credential_file(url):
 
 def _show_plan(args, credential_file):
     try:
-        report = plan_deployment(args.directory, args.config, credential_file, preview=args.preview,
-                                 production=args.prod, preset=args.preset).summary()
+        if args.prebuilt:
+            report, _ = read_prebuilt(args.directory, production=args.prod)
+        else:
+            report = plan_deployment(args.directory, args.config, credential_file, preview=args.preview,
+                                     production=args.prod, preset=args.preset).summary()
     except (PlanError, OSError) as error:
         if args.json:
             code = error.code if isinstance(error, PlanError) else "unreadable_project"
@@ -274,10 +278,15 @@ def main(prog="poteto"):
         link.add_argument("--project", help="Project ID (defaults to the project from poteto login)")
         unlink_command = commands.add_parser("unlink", help="Remove only this directory's local project link")
         unlink_command.add_argument("directory", type=Path, nargs="?", default=Path("."))
+        build = commands.add_parser("build", help="Build a trusted static project locally; do not upload")
+        build.add_argument("directory", type=Path, nargs="?", default=Path("."))
+        build.add_argument("--config", type=Path, help="Build configuration JSON")
+        build.add_argument("--preset", choices=["vite"])
         plan = commands.add_parser("plan", help="Inspect a deployment locally without logging in or uploading")
         plan.add_argument("directory", type=Path, nargs="?", default=Path("."))
         plan.add_argument("--config", type=Path, help="Deployment configuration JSON")
         plan.add_argument("--preset", choices=["nextjs", "vite"], help="Apply a framework's build and runtime defaults")
+        plan.add_argument("--prebuilt", action="store_true", help="Inspect the static artifact from poteto build")
         target = plan.add_mutually_exclusive_group()
         target.add_argument("--preview", action="store_true")
         target.add_argument("--prod", action="store_true", help="Plan an explicit production deployment")
@@ -324,6 +333,7 @@ def main(prog="poteto"):
     deploy.add_argument("--config", type=Path, help="Deployment configuration JSON")
     if prog != "paas":
         deploy.add_argument("--preset", choices=["nextjs", "vite"])
+        deploy.add_argument("--prebuilt", action="store_true", help="Upload only the static artifact from poteto build")
     target = deploy.add_mutually_exclusive_group()
     target.add_argument("--preview", action="store_true")
     target.add_argument("--prod", action="store_true", help="Explicitly deploy to production")
@@ -374,6 +384,8 @@ def main(prog="poteto"):
         delete.add_argument('--destroy-data',action='store_true',required=True,help='Explicitly destroy the stored data, after all bound releases are removed')
     args = parser.parse_args()
     args.command = {"ls": "deployments", "inspect": "status"}.get(args.command, args.command)
+    if getattr(args, "prebuilt", False) and (args.config is not None or args.preset):
+        parser.error("Use --config and --preset with poteto build, not --prebuilt")
     if args.command in {"deploy", "redeploy"} and args.no_wait and args.url_only:
         parser.error("--url-only requires waiting for the release")
     if args.command == "env":
@@ -398,6 +410,14 @@ def main(prog="poteto"):
         if args.command == "init":
             print(json.dumps(initialize(args.directory, args.runtime), indent=2, ensure_ascii=False))
             return
+        if args.command in {"build", "plan"}:
+            token_file = os.environ.get("POTETO_TOKEN_FILE") or os.environ.get("PAAS_TOKEN_FILE") or default_token_file()
+            if args.command == "build":
+                result = build_static(args.directory, args.config, token_file, preset=args.preset)
+                print(json.dumps(result, indent=2, ensure_ascii=False))
+            else:
+                _show_plan(args, token_file)
+            return
         linked = find_link(getattr(args, "directory", Path("."))) if prog != "paas" else None
         explicit_url = args.url or os.environ.get("POTETO_URL") or os.environ.get("PAAS_URL")
         args.url = explicit_url or (linked.url if linked else DEFAULT_URL)
@@ -406,10 +426,6 @@ def main(prog="poteto"):
             return
         if args.command == "logout":
             print(json.dumps(logout(Client, args.url, args.file), indent=2))
-            return
-        if args.command == "plan":
-            token_file = os.environ.get("POTETO_TOKEN_FILE") or os.environ.get("PAAS_TOKEN_FILE") or default_token_file()
-            _show_plan(args, token_file)
             return
         token_file = _credential_file(args.url)
         token = os.environ.get("POTETO_TOKEN") or os.environ.get("PAAS_TOKEN")
@@ -516,6 +532,9 @@ def main(prog="poteto"):
                     raise RuntimeError("Deployment directory does not exist")
                 config = deployment_config(args.directory, args.config)
                 source = pack(args.directory, token_file)
+            elif args.prebuilt:
+                report, source = read_prebuilt(args.directory, production=args.prod)
+                config = {"runtime": "static", "target": report["target"]}
             else:
                 prepared = plan_deployment(args.directory, args.config, token_file, preview=args.preview,
                                            production=args.prod, preset=args.preset)

@@ -35,6 +35,14 @@ try {
     [IO.File]::WriteAllText($config, '{"runtime":"static","target":"preview"}', [Text.UTF8Encoding]::new($true))
     $report = (& poteto plan $site --config $config --preview --json) | ConvertFrom-Json
     Assert ($LASTEXITCODE -eq 0 -and $report.ok -and $report.directory -eq $site) 'Spaces, Unicode, or BOM config failed'
+    [IO.File]::WriteAllText((Join-Path $site 'package.json'), '{"name":"poteto-local-test","version":"1.0.0","scripts":{"build":"node build.cjs"}}')
+    [IO.File]::WriteAllText((Join-Path $site 'package-lock.json'), '{"name":"poteto-local-test","version":"1.0.0","lockfileVersion":3,"packages":{"":{"name":"poteto-local-test","version":"1.0.0"}}}')
+    [IO.File]::WriteAllText((Join-Path $site 'build.cjs'), "const fs=require('node:fs');fs.mkdirSync('dist',{recursive:true});fs.writeFileSync('dist/index.html','built');")
+    [IO.File]::WriteAllText($config, '{"runtime":"static","build_command":"npm run build","output_directory":"dist"}')
+    $build = (& poteto build $site --config $config) | ConvertFrom-Json
+    Assert ($LASTEXITCODE -eq 0 -and $build.ok -and (Test-Path -LiteralPath $build.artifact)) 'Local npm build or artifact generation failed'
+    $report = (& poteto plan $site --prebuilt --json) | ConvertFrom-Json
+    Assert ($LASTEXITCODE -eq 0 -and $report.ok -and $report.origin -eq 'prebuilt' -and $report.upload_files -eq 1) 'Prebuilt plan included source or failed'
     $node = Join-Path $root 'node app'
     & poteto init $node --runtime node | Out-Null
     $report = (& poteto plan $node --preview --json) | ConvertFrom-Json

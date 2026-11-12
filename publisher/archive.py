@@ -3,6 +3,7 @@ import gzip
 import os
 import shutil
 import tarfile
+import zlib
 from pathlib import Path, PurePosixPath
 
 
@@ -13,7 +14,7 @@ class ArchiveError(ValueError):
 class LimitedGzip:
     """Bound metadata reads and all expanded offsets, including tar extension headers."""
     def __init__(self, filename, limit):
-        self.stream = gzip.GzipFile(filename, "rb")
+        self.stream = gzip.open(filename, "rb")
         self.limit = limit
 
     def __enter__(self):
@@ -39,8 +40,9 @@ class LimitedGzip:
         return self.stream.seek(offset, whence)
 
 
-def unpack(source, destination: Path | None, *, max_bytes, max_files, private=False):
+def unpack(source, destination: Path | None, *, max_bytes, max_files, private=False, required_file=None):
     count = size = 0
+    found_required = required_file is None
     names = set()
     try:
         with LimitedGzip(source, max_bytes + max_files * 2048 + 1024) as compressed, tarfile.open(fileobj=compressed, mode="r:") as archive:
@@ -64,6 +66,7 @@ def unpack(source, destination: Path | None, *, max_bytes, max_files, private=Fa
                         (destination / normalized).mkdir(parents=True, exist_ok=True)
                     continue
                 count += 1
+                found_required |= normalized == required_file
                 size += entry.size
                 if count > max_files or size > max_bytes:
                     raise ArchiveError("Unpacked project exceeds its file or byte limit")
@@ -79,13 +82,15 @@ def unpack(source, destination: Path | None, *, max_bytes, max_files, private=Fa
                 else:
                     while stream.read(1024 * 1024):
                         pass
-    except (tarfile.TarError, EOFError, OSError) as error:
+    except (tarfile.TarError, EOFError, OSError, zlib.error) as error:
         raise ArchiveError("Invalid or conflicting tar.gz contents") from error
     if destination:
         # A worker's restrictive umask must not make public files unreadable inside nginx.
         for directory in [destination, *destination.rglob("*")]:
             if directory.is_dir():
                 directory.chmod(0o700 if private else 0o755)
+    if not found_required:
+        raise ArchiveError(f"Archive must contain {required_file} at its root")
     if count == 0:
         raise ArchiveError("Project archive is empty")
     return {"files": count, "unpacked_bytes": size}

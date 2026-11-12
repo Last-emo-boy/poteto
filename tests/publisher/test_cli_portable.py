@@ -145,6 +145,18 @@ class PortableClientTests(unittest.TestCase):
                     self.assertEqual("c"*24,cloned["id"])
                     self.assertEqual("native-check",state["request_id"])
                     self.assertIn("HTTP 403",command("deploy",".","--prod","--no-wait",status=1))
+                    previous_requests = state["authorized"]
+                    self.assertIn("Run poteto build",command("deploy",".","--prebuilt","--no-wait",status=1))
+                    snapshot = Path(command("build",".")["artifact"]).read_bytes()
+                    (directory/"index.html").write_text("changed source",encoding="utf-8")
+                    (directory/"poteto.json").write_text('{"runtime":"node","target":"production"}',encoding="utf-8")
+                    prebuilt = command("plan",".","--prebuilt","--json")
+                    self.assertEqual(("preview", 2, None), (prebuilt["target"], prebuilt["upload_files"], prebuilt["build_command"]))
+                    self.assertEqual(previous_requests, state["authorized"])
+                    command("deploy",".","--prebuilt","--no-wait")
+                    self.assertEqual({"runtime":"static","target":"preview"},state["config"])
+                    self.assertEqual(snapshot,state["archive"])
+                    self.assertIn("HTTP 403",command("deploy",".","--prebuilt","--prod","--no-wait",status=1))
                     self.assertTrue(command("unlink")["unlinked"])
             finally:
                 os.chdir(previous)

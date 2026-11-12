@@ -50,18 +50,24 @@ def write_link(directory, url, project_id):
         raise ValueError("Choose an existing application directory")
     if not re.fullmatch(r"[a-f0-9]{24}", project_id):
         raise ValueError("The API returned an invalid project ID")
-    folder = root / ".poteto"
-    if folder.is_symlink():
-        raise ValueError("The .poteto directory must not be a symlink")
-    folder.mkdir(exist_ok=True)
+    folder = local_directory(root, create=True)
     path = folder / "project.json"
     value = {"version": 1, "url": url, "project_id": project_id}
     with path.open("x", encoding="utf-8") as output:
         output.write(json.dumps(value, indent=2) + "\n")
-    ignored = folder / ".gitignore"
-    if not ignored.exists() and not ignored.is_symlink():
-        ignored.write_text("*\n", encoding="utf-8")
     return value | {"directory": str(root)}
+
+
+def local_directory(root: Path, *, create=False):
+    folder = root / ".poteto"
+    if folder.is_symlink() or folder.resolve() != folder:
+        raise ValueError("The .poteto directory must not be a link")
+    if create:
+        folder.mkdir(exist_ok=True)
+        ignored = folder / ".gitignore"
+        if not ignored.exists() and not ignored.is_symlink():
+            ignored.write_text("*\n", encoding="utf-8")
+    return folder
 
 
 def unlink(directory):
