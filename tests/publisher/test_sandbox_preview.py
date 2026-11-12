@@ -110,3 +110,20 @@ class SandboxPreviewTests(unittest.TestCase):
         self.assertEqual('3000', fields['environment']['PORT'])
         route = self.root / ('publisher-preview-' + release['id'] + '.yml')
         self.assertIn('http://10.201.0.2:23000', route.read_text())
+
+        lingering = Mock(status=200)
+        lingering.getheader.return_value = release['id']
+        withdrawn = Mock(status=404)
+        withdrawn.getheader.return_value = None
+        with (patch.object(backend, 'execution_client', return_value=client),
+              patch('publisher.backend.time.sleep'),
+              patch('publisher.backend.http.client.HTTPConnection') as http):
+            http.return_value.getresponse.side_effect = [lingering, withdrawn]
+
+            def after_withdrawal(*args):
+                self.assertFalse(route.exists())
+                self.assertEqual(2, http.return_value.getresponse.call_count)
+
+            client.sandbox.side_effect = after_withdrawal
+            backend.remove(release)
+        self.assertEqual('delete', client.sandbox.call_args.args[-1])

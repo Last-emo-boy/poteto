@@ -306,7 +306,7 @@ class Dokploy:
             static_artifacts.remove(self.settings, deployment['id'])
             return
         if deployment.get('runtime_driver') == SANDBOX_DRIVER:
-            self.remove_preview_route(deployment['id'])
+            self.withdraw_sandbox_route(deployment)
             self.sandbox_action(deployment, 'delete')
             client, account_id = self.execution_client(), self.account(deployment)
             client.build_operation(account_id, deployment['id'], 'cancel')
@@ -348,6 +348,25 @@ class Dokploy:
         path = Path(self.config.get('routes', '/etc/dokploy/traefik/dynamic')) / ('publisher-preview-' + deployment_id + '.yml')
         path.unlink(missing_ok=True)
         path.with_suffix('.next').unlink(missing_ok=True)
+
+    def withdraw_sandbox_route(self, deployment, timeout=20):
+        self.remove_preview_route(deployment['id'])
+        deadline = time.monotonic() + timeout
+        # Confirm Traefik consumed the removal before the executor can reuse
+        # this release's private port for another tenant.
+        while time.monotonic() < deadline:
+            conn = http.client.HTTPConnection('127.0.0.1', 80, timeout=3)
+            try:
+                conn.request('GET', '/__paas_route_probe__', headers={'Host': self.hostname(deployment)})
+                response = conn.getresponse()
+                if response.status == 404 and response.getheader('X-Paas-Deployment') != deployment['id']:
+                    return
+            except (OSError, http.client.HTTPException):
+                pass
+            finally:
+                conn.close()
+            time.sleep(.5)
+        raise BackendError('Sandbox route is still active; the private port was retained for safe cleanup')
 
     def remove_project_route(self, project_id):
         path=Path(self.config.get('routes','/etc/dokploy/traefik/dynamic'))/('publisher-'+project_id+'.yml')
