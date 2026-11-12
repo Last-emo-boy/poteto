@@ -234,7 +234,7 @@ For persistent production data, use the management credential to create `poteto 
 
 Full production backups use `poteto export create PROJECT_ID --recipient AGE_PUBLIC_KEY` without `--deployment`. Restore into an empty enabled personal project with `poteto import create PROJECT_ID BUNDLE --identity KEY` without `--preview`. The production bundle includes both stages' project environment and database resources; protect the recipient key accordingly. Native restore preserves the schema and skips its already-applied migration.
 
-Operators enable this path with `personal_production: true` in the publisher runtime configuration, alongside `personal_previews` and, for databases, `native_databases`. Existing managed projects, credentials and VM routes retain their original contract. Turning the flag off stops new personal production logins and image/data/import operations; it does not revoke issued credentials or withdraw an already running route.
+Deploy matching publisher and executor code, including `execution/sandbox_wake.py`, before enabling this path with `personal_production: true` in the publisher runtime configuration, alongside `personal_previews` and, for databases, `native_databases`. Existing managed projects, credentials and VM routes retain their original contract. Turning the flag off stops new personal production logins, image deployments, database allocation and imports; it does not revoke issued credentials or withdraw an already running route.
 
 ### Preview PostgreSQL without a tenant VM
 
