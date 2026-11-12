@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from publisher.api import create_app
 from publisher.config import Settings
 from publisher.data_backend import DataBackend
+from publisher.backend import BackendError
 from publisher.models import DeploymentInput
 from publisher.store import Store
 from publisher.worker import Worker
@@ -108,7 +109,7 @@ class DataTests(unittest.TestCase):
         data=DataBackend(backend)
         with patch.object(data,'request',return_value={'container':None}), \
              patch('publisher.data_backend.time.sleep') as sleep:
-            with self.assertRaisesRegex(Exception,'ended without a container'):
+            with self.assertRaisesRegex(BackendError,'ended without a container'):
                 data.wait_for_database_container({'id':'resource'},'compose',lambda:None)
         sleep.assert_not_called()
 
