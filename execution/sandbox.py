@@ -392,7 +392,11 @@ def operation(root, config, release, body, build_status):
             value['http_port'] = sandbox_wake.PROXY_PORT if receipt.get('wake') else receipt['host_port']
         return value
     if action == "logs":
-        return {"log": docker("logs", "--tail", "200", name)[-65536:] if container else ""}
+        from publisher.container_logs import capture
+        try:
+            return {"log": capture(name, command=('/usr/bin/docker','--host','unix:///var/run/docker.sock')) if container else ""}
+        except RuntimeError:
+            raise ValueError('Sandbox runtime log collection failed') from None
     if receipt.get("wake"):
         receipt["wake_ready"] = False
         save(path, receipt)

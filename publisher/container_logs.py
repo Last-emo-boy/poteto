@@ -2,8 +2,8 @@
 import subprocess
 
 
-def capture(container_id):
-    process=subprocess.Popen(['docker','logs','--timestamps','--tail','200',container_id],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+def capture(container_id, *, command=('docker',)):
+    process=subprocess.Popen([*command,'logs','--timestamps','--tail','200',container_id],stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     try:
         result=subprocess.run(['tail','-c','65536'],stdin=process.stdout,capture_output=True,check=True,timeout=30)
         process.stdout.close()

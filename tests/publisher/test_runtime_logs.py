@@ -13,6 +13,7 @@ from publisher.config import Settings
 from publisher.container_logs import capture
 from publisher.worker import Worker
 from execution import runtime_rpc
+from execution import sandbox
 from publisher.runtime_logs import save
 
 
@@ -184,6 +185,24 @@ class RuntimeLogTests(unittest.TestCase):
         with patch.object(backend,'find_container',return_value={'Id':'a'*64}) as find,patch('publisher.backend.capture',return_value='legacy log') as read:
             self.assertEqual('legacy log',backend.runtime_logs({'id':self.release}))
             find.assert_called_once_with(self.release);read.assert_called_once_with('a'*64)
+
+    def test_sandbox_logs_use_timestamped_bounded_capture_without_starting(self):
+        account,project='a'*24,'b'*24
+        sandbox.save(self.root/'sandboxes'/(self.release+'.json'),{'account_id':account,'project_id':project,'host_port':23000})
+        body={'action':'logs','account_id':account,'project_id':project}
+        current={'Config':{'Labels':sandbox.labels(self.release,account,project)},'State':{'Running':False}}
+        with patch.object(sandbox,'inspect',return_value=current),patch('publisher.container_logs.capture',return_value='timestamp stderr') as read,patch.object(sandbox,'docker') as docker:
+            self.assertEqual({'log':'timestamp stderr'},sandbox.operation(self.root,{},self.release,body,Mock()))
+            read.assert_called_once_with('poteto-sbx-'+self.release,command=('/usr/bin/docker','--host','unix:///var/run/docker.sock'))
+            docker.assert_not_called()
+        with patch.object(sandbox,'inspect',return_value=current),patch('publisher.container_logs.capture',side_effect=RuntimeError('failed')):
+            with self.assertRaisesRegex(ValueError,'log collection failed'):sandbox.operation(self.root,{},self.release,body,Mock())
+
+    def test_sandbox_refuses_foreign_ownership_before_log_capture(self):
+        sandbox.save(self.root/'sandboxes'/(self.release+'.json'),{'account_id':'a'*24,'project_id':'b'*24,'host_port':23000})
+        with patch('publisher.container_logs.capture') as read,self.assertRaisesRegex(ValueError,'does not belong'):
+            sandbox.operation(self.root,{},self.release,{'action':'logs','account_id':'c'*24,'project_id':'b'*24},Mock())
+        read.assert_not_called()
 
     def test_real_pipe_bounds_large_stdout_and_stderr(self):
         command=self.root/'docker'
