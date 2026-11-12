@@ -2,7 +2,7 @@
 # Exercise real Docker save and load, not an image hand-written by a fixture.
 set -eu
 root=$(mktemp -d)
-release=aaaaaaaaaaaaaaaaaaaaaaaa
+release=$(python -c 'import secrets; print(secrets.token_hex(12))')
 source="poteto-prebuilt-ci:$(basename "$root" | tr '[:upper:]' '[:lower:]')"
 canonical="paas-release:$release"
 container=
