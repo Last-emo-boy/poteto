@@ -79,6 +79,19 @@ class DataTests(unittest.TestCase):
             self.assertEqual(201,response.status_code,response.text)
         self.assertEqual(429,self.client.post('/v1/projects/'+self.project+'/deployments',json={'runtime':'node','memory_mb':1024,'cpus':0.1}).status_code)
 
+    def test_database_health_waits_for_tcp_not_the_temporary_init_socket(self):
+        resource_id=self.resource()['id']
+        with self.store.connection() as db:
+            resource=dict(db.execute('SELECT * FROM data_resources WHERE id=?',(resource_id,)).fetchone())
+        backend=Mock();backend.store=self.store
+        registry=Mock();registry.ensure.return_value={'server_id':'server'}
+        with patch('publisher.data_backend.RuntimeRegistry',return_value=registry), \
+             patch.object(DataBackend,'request',side_effect=[{}, {'container':None}, {'ready':True}]):
+            DataBackend(backend).create(resource,lambda:None)
+        config=backend.create_compose.call_args.args[1]
+        probe=config['services']['postgres']['healthcheck']['test']
+        self.assertEqual(['CMD','pg_isready','-h','127.0.0.1','-U','paas_admin','-d','app'],probe)
+
     def test_data_delete_requires_explicit_intent_and_no_retained_bindings(self):
         resource=self.resource('volumes',ready=True);path='/v1/data/'+resource['id']
         self.assertEqual(409,self.client.delete(path).status_code)

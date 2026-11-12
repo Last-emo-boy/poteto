@@ -45,10 +45,10 @@ write_key=$(python -c 'import secrets; print(secrets.token_hex(24))')
 printf 'POSTGRES_PASSWORD=%s\nPOSTGRES_USER=app\nPOSTGRES_DB=app\n' "$password" > "$root/db.env"
 docker run -d --name "$database" --network "$network" --network-alias db --env-file "$root/db.env" postgres:16-alpine >/dev/null
 for attempt in {1..60}; do
-    if docker exec "$database" pg_isready -U app -d app >/dev/null 2>&1; then break; fi
+    if docker exec "$database" pg_isready -h 127.0.0.1 -U app -d app >/dev/null 2>&1; then break; fi
     sleep 1
 done
-docker exec "$database" pg_isready -U app -d app
+docker exec "$database" pg_isready -h 127.0.0.1 -U app -d app
 printf 'DATABASE_URL=postgresql://app:%s@db:5432/app\nTEST_WRITE_KEY=%s\n' "$password" "$write_key" > "$root/app.env"
 docker run --rm --network "$network" --env-file "$root/app.env" "$canonical" node migrate.mjs
 app=$(docker run -d --network "$network" --env-file "$root/app.env" -p 127.0.0.1::3000 "$canonical")

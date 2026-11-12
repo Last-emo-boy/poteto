@@ -37,7 +37,7 @@ class DataBackend:
                 'command':['postgres','-c','max_connections=20','-c','shared_buffers=32MB','-c','work_mem=2MB','-c','maintenance_work_mem=16MB','-c','max_wal_size=128MB'],
                 'volumes':['data:/var/lib/postgresql/data'],'networks':{'private':{'aliases':['db-'+rid]}},
                 'labels':{'paas.publisher.resource':rid,'paas.publisher.project':resource['project_id'],'paas.publisher.kind':'database','traefik.enable':'false'}|labels,
-                'healthcheck':{'test':['CMD','pg_isready','-U','paas_admin','-d','app'],'interval':'2s','timeout':'3s','retries':45,'start_period':'3s'},
+                'healthcheck':{'test':['CMD','pg_isready','-h','127.0.0.1','-U','paas_admin','-d','app'],'interval':'2s','timeout':'3s','retries':45,'start_period':'3s'},
                 'logging':{'driver':'json-file','options':{'max-size':'5m','max-file':'2'}}}},
             'volumes':{'data':{'external':True,'name':'paas-data-'+rid}},
             'networks':{'private':{'name':'paas-data-'+rid,'internal':True,'labels':{'paas.publisher.resource':rid}}}}
