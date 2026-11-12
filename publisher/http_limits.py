@@ -32,7 +32,8 @@ class ControlLimits:
             # Source bodies are streamed with their own byte limit, lease and deadline.
             is_source = scope["method"] == "PUT" and scope["path"].endswith("/source")
             is_import_part = scope['method']=='PUT' and bool(re.fullmatch(r'/v1/imports/[a-f0-9]{24}/part',scope['path']))
-            if scope["method"] in {"POST", "PUT", "PATCH"} and not (is_source or is_import_part):
+            is_upload_part = scope['method']=='PUT' and bool(re.fullmatch(r'/v1/deployments/[a-f0-9]{24}/source-upload/part',scope['path']))
+            if scope["method"] in {"POST", "PUT", "PATCH"} and not (is_source or is_import_part or is_upload_part):
                 try:
                     length = int(headers.get("content-length", "0"))
                 except ValueError:

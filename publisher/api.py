@@ -65,6 +65,8 @@ def create_app(settings=None):
     register_exports(app,store,actor)
     from publisher.project_imports import register as register_imports
     register_imports(app,store,actor)
+    from publisher.source_uploads import register as register_uploads
+    register_uploads(app, store, actor)
 
     def release_view(row):
         config = json.loads(row["config"])
@@ -75,7 +77,8 @@ def create_app(settings=None):
                 "artifact_bytes": row["artifact_bytes"], "error": row["error"],
                 "url": preview if row["state"] == "ready" else None,
                 "production_url": "https://" + settings.hostname(row["project_id"],domain=row["app_domain"]),
-                "upload_url": f"/v1/deployments/{row['id']}/source" if row["state"] == "uploading" else None}
+                "upload_url": f"/v1/deployments/{row['id']}/source" if row["state"] == "uploading" else None,
+                "resumable_upload_url": f"/v1/deployments/{row['id']}/source-upload" if row["state"] == "uploading" else None}
 
     from publisher.redeploy import register as register_redeploy
     register_redeploy(app, store, actor, release_view)

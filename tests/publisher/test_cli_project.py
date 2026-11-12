@@ -46,10 +46,10 @@ class ProjectCliTests(unittest.TestCase):
         self.addCleanup(environment.stop)
         api = self.api
         class LocalClient(cli.Client):
-            def request(self, method, path, body=None, raw=False):
+            def request(self, method, path, body=None, raw=False, *, timeout=180):
                 headers = {"Authorization": "Bearer " + self.token} if self.token else {}
                 if raw:
-                    response = api.request(method, path, content=body, headers=headers | {"Content-Type": "application/gzip"})
+                    response = api.request(method, path, content=body, headers=headers | {"Content-Type": raw if isinstance(raw, str) else "application/gzip"})
                 else:
                     response = api.request(method, path, json=body, headers=headers)
                 if response.status_code >= 400:

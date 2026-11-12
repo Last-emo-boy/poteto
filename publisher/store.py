@@ -87,6 +87,9 @@ CREATE TABLE IF NOT EXISTS execution_targets (
  server_id TEXT NOT NULL, http_port INTEGER NOT NULL, created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS uploads (
  deployment_id TEXT PRIMARY KEY REFERENCES deployments(id), upload_id TEXT NOT NULL, expires REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS source_uploads (
+ deployment_id TEXT PRIMARY KEY REFERENCES deployments(id) ON DELETE CASCADE,
+ size INTEGER NOT NULL, sha256 TEXT NOT NULL, received INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS rate_limits (
  token_id TEXT PRIMARY KEY REFERENCES tokens(id), window INTEGER NOT NULL, requests INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS queue_state ON jobs(state, created);
@@ -463,20 +466,25 @@ class Store:
             self.audit(db, actor, "environment.patch." + target, project_id)
         return {"keys": sorted(current), "applies_to": "new deployments"}
 
-    def check_upload_capacity(self, db, runtime):
+    def check_upload_capacity(self, db, runtime, *, reserve_new=True):
         upload_limit, _, _ = self.settings.upload_limits(runtime)
-        if shutil.disk_usage(self.settings.root).free < 1024**3 + upload_limit:
+        reserved = db.execute("SELECT coalesce(sum(s.size-s.received),0) FROM source_uploads s "
+                              "JOIN deployments d ON d.id=s.deployment_id WHERE d.state='uploading'").fetchone()[0]
+        if shutil.disk_usage(self.settings.root).free < 1024**3 + reserved + (upload_limit if reserve_new else 0):
             raise Problem(507, "Upload refused to preserve the platform's free disk reserve")
         if db.execute("SELECT count(*) FROM uploads WHERE expires>=?", (time.time(),)).fetchone()[0] >= 4:
             raise Problem(429, "Upload concurrency limit reached")
 
-    def begin_upload(self, actor, deployment_id, upload_id):
+    def begin_upload(self, actor, deployment_id, upload_id, *, resumable=False):
         with self.connection() as db:
             deployment = self.deployment(db, actor, deployment_id, "deployments:write", allow_preview=True)
             if deployment["state"] != "uploading":
                 raise Problem(409, "Deployment no longer accepts an upload")
+            session = db.execute("SELECT 1 FROM source_uploads WHERE deployment_id=?", (deployment_id,)).fetchone()
+            if bool(session) != resumable:
+                raise Problem(409, "Use this deployment's existing upload protocol")
             db.execute("DELETE FROM uploads WHERE expires<?", (time.time(),))
-            self.check_upload_capacity(db, json.loads(deployment["config"])["runtime"])
+            self.check_upload_capacity(db, json.loads(deployment["config"])["runtime"], reserve_new=not resumable)
             try:
                 db.execute("INSERT INTO uploads VALUES(?,?,?)", (deployment_id, upload_id, time.time() + 180))
             except sqlite3.IntegrityError:
@@ -484,8 +492,12 @@ class Store:
 
     @staticmethod
     def storage_used(db, account_id):
-        return db.execute("SELECT coalesce(sum(d.artifact_bytes+d.unpacked_bytes+d.built_bytes),0) FROM deployments d "
-                          "JOIN projects p ON p.id=d.project_id WHERE p.account_id=?", (account_id,)).fetchone()[0]
+        stored = db.execute("SELECT coalesce(sum(d.artifact_bytes+d.unpacked_bytes+d.built_bytes),0) FROM deployments d "
+                            "JOIN projects p ON p.id=d.project_id WHERE p.account_id=?", (account_id,)).fetchone()[0]
+        reserved = db.execute("SELECT coalesce(sum(s.size),0) FROM source_uploads s JOIN deployments d ON d.id=s.deployment_id "
+                              "JOIN projects p ON p.id=d.project_id WHERE p.account_id=? AND d.state='uploading'",
+                              (account_id,)).fetchone()[0]
+        return stored + reserved
 
     def reserve_built_artifact(self, deployment_id, size, *, image=False):
         with self.connection() as db:
@@ -499,13 +511,20 @@ class Store:
                 raise Problem(429, "Built files exceed the account artifact storage quota")
             db.execute("UPDATE deployments SET built_bytes=? WHERE id=?", (size, deployment_id))
 
-    def enqueue_upload(self, actor, deployment_id, path, size, unpacked_bytes):
+    def enqueue_upload(self, actor, deployment_id, path, size, unpacked_bytes, *, upload_id=None):
         with self.connection() as db:
             deployment = self.deployment(db, actor, deployment_id, "deployments:write", allow_preview=True)
             if deployment["state"] != "uploading":
                 raise Problem(409, "Deployment no longer accepts an upload")
+            if upload_id is not None and not db.execute(
+                    "SELECT 1 FROM uploads WHERE deployment_id=? AND upload_id=? AND expires>?",
+                    (deployment_id, upload_id, time.time())).fetchone():
+                raise Problem(409, "Upload no longer owns this deployment")
             account = db.execute("SELECT * FROM accounts WHERE id=?", (actor["account_id"],)).fetchone()
             used = self.storage_used(db, actor["account_id"])
+            reserved = db.execute("SELECT size FROM source_uploads WHERE deployment_id=?", (deployment_id,)).fetchone()
+            if reserved:
+                used -= reserved["size"]
             if used + size + unpacked_bytes > account["max_storage"]:
                 raise Problem(429, "Artifact storage quota reached")
             path.replace(self.settings.root / "artifacts" / f"{deployment_id}.tar.gz")
@@ -554,6 +573,8 @@ class Store:
         with self.connection() as db:
             db.execute('DELETE FROM uploads WHERE expires<?', (now,))
             db.execute("UPDATE deployments SET state='cancelled',error='Unsubmitted deployment expired after 24 hours',updated=? WHERE state='uploading' AND created<? AND id NOT IN (SELECT deployment_id FROM uploads)", (now,now-86400))
+            from publisher.source_uploads import expire
+            expire(self, db)
         # Streams have a 120-second deadline and a 180-second lease. Keep a full
         # hour of margin before removing abandoned temporary files after a crash.
         for path in (self.settings.root / 'uploads').glob('*.part'):

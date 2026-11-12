@@ -61,6 +61,18 @@ Agents can follow the [Poteto preview skill](skills/poteto-deploy/SKILL.md) for 
 
 Use `poteto logs DEPLOYMENT_ID --follow` to watch a build as it runs, including a deployment started with `--no-wait`. Build output goes to stderr; the final deployment remains JSON on stdout.
 
+## Resume an interrupted upload
+
+CLI 0.12.0 and an updated server transfer artifacts in 2 MiB parts, with committed offsets and a complete-file integrity check before queueing the deployment. A dropped connection does not require uploading completed parts again.
+
+```sh
+poteto deploy . --local-build --preview
+# If interrupted, in the same directory:
+poteto deploy . --resume DEPLOYMENT_ID
+```
+
+The CLI saves the original artifact and its API/project/target in `.poteto/` with restricted file permissions, without credentials. `--resume` sends those same bytes; it does not rebuild or read modified application files. Omit build/configuration/target flags when resuming, and keep the original credential or another credential authorized for that project. Add `--project PROJECT_ID` for a manual token. The local pending copy is removed after the server confirms queueing. Unsubmitted server uploads expire after 24 hours and count toward storage quotas. The original whole-archive endpoint remains available for older clients; a new client uses it only when the server does not advertise resumable uploads.
+
 ## Runtime variables and redeploys
 
 ```sh

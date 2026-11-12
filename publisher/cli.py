@@ -24,6 +24,7 @@ if __package__:
     from .image_contract import UPLOAD_LIMIT as IMAGE_UPLOAD_LIMIT
     from .login_contract import DEFAULT_URL, LOGIN_PATH
     from .transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
+    from . import cli_upload
 else:
     from cli_login import default_token_file, login, logout
     from cli_tools import VERSION, PlanError, deployment_config, initialize, pack, plan_deployment
@@ -31,6 +32,7 @@ else:
     from cli_project import deployment_reference, find_link, unlink, write_link
     from login_contract import DEFAULT_URL, LOGIN_PATH
     from transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
+    import cli_upload
 
 
 class Client:
@@ -59,7 +61,7 @@ class Client:
                     message = json.loads(error.read())
             except (ValueError, UnicodeDecodeError):
                 message = {"error": f"HTTP {error.code}"}
-            raise RuntimeError(f"HTTP {error.code}: {json.dumps(message, ensure_ascii=False)}") from None
+            raise cli_upload.RequestError(error.code, f"HTTP {error.code}: {json.dumps(message, ensure_ascii=False)}") from None
 
     def wait(self, release_id, timeout):
         deadline = time.monotonic() + timeout
@@ -358,6 +360,7 @@ def main(prog="poteto"):
     deploy.add_argument("--config", type=Path, help="Deployment configuration JSON")
     if prog != "paas":
         deploy.add_argument("--preset", choices=["nextjs", "vite"])
+        deploy.add_argument("--resume", metavar="DEPLOYMENT", help="Resume this directory's saved upload without rebuilding or creating a release")
         artifact = deploy.add_mutually_exclusive_group()
         artifact.add_argument("--local-build", action="store_true", help="Build on this client, preflight and upload only the result")
         artifact.add_argument("--prebuilt", action="store_true", help="Upload only the static artifact from poteto build")
@@ -412,6 +415,9 @@ def main(prog="poteto"):
         delete.add_argument('--destroy-data',action='store_true',required=True,help='Explicitly destroy the stored data, after all bound releases are removed')
     args = parser.parse_args()
     args.command = {"ls": "deployments", "inspect": "status"}.get(args.command, args.command)
+    if getattr(args, "resume", None) and any((args.local_build, args.prebuilt, args.prebuilt_image,
+                                               args.preset, args.config, args.prod, args.preview)):
+        parser.error("--resume reuses the saved artifact and target; omit build, configuration and target flags")
     if getattr(args, "prebuilt", False) and (args.config is not None or args.preset):
         parser.error("Use --config and --preset with poteto build, not --prebuilt")
     if getattr(args, "prebuilt_image", None) and args.preset:
@@ -564,7 +570,11 @@ def main(prog="poteto"):
             project_id = args.project
             if not project_id:
                 parser.error("deploy requires --project PROJECT_ID when using a manual token")
-            if prog == "paas":
+            resuming = getattr(args, "resume", None)
+            if resuming:
+                result, source = cli_upload.resume(args.directory, client, args.resume, project_id)
+                config = result["config"]
+            elif prog == "paas":
                 if not args.directory.is_dir():
                     raise RuntimeError("Deployment directory does not exist")
                 config = deployment_config(args.directory, args.config)
@@ -589,18 +599,29 @@ def main(prog="poteto"):
                                            production=args.prod, preset=args.preset)
                 config = prepared.config
                 source = pack(prepared.directory, files=prepared.files)
-            if args.prod:
+            if not resuming and args.prod:
                 config["target"] = "production"
-            elif args.preview or ((signed_in_project or linked_project) and "target" not in config):
+            elif not resuming and (args.preview or ((signed_in_project or linked_project) and "target" not in config)):
                 config["target"] = "preview"
             limit = IMAGE_UPLOAD_LIMIT if config.get("runtime") == "image" else 50 * 1024**2
             if len(source) > limit:
                 raise RuntimeError(f"Archive exceeds the server upload limit of {limit // 1024**2} MiB")
-            result = client.request("POST", f"/v1/projects/{project_id}/deployments", config)
+            if not resuming:
+                result = client.request("POST", f"/v1/projects/{project_id}/deployments", config)
+            resumable = resuming or result.get("resumable_upload_url")
+            if resumable and not resuming:
+                cli_upload.checkpoint(args.directory, client, result, source)
             try:
-                client.request("PUT", result["upload_url"], source, raw=True)
-            except RuntimeError:
-                print(f"Upload failed for deployment {result['id']}; inspect its status before retrying", file=sys.stderr)
+                if resumable:
+                    cli_upload.transfer(client, result["id"], source)
+                    cli_upload.discard(args.directory, result["id"])
+                else:
+                    client.request("PUT", result["upload_url"], source, raw=True)
+            except (RuntimeError, OSError, http.client.HTTPException, KeyboardInterrupt):
+                if resumable:
+                    print(f"Upload interrupted. In the same directory, run poteto deploy . --project {project_id} --resume {result['id']}; do not rebuild or create another release.", file=sys.stderr)
+                else:
+                    print(f"Upload failed for deployment {result['id']}; inspect its status before retrying", file=sys.stderr)
                 raise
             if not args.no_wait:
                 result = client.wait(result["id"], args.timeout)
@@ -665,7 +686,7 @@ def main(prog="poteto"):
             else:
                 result=client.request('DELETE','/v1/data/'+args.resource+'?destroy_data=true')
         print(json.dumps(result, indent=2, ensure_ascii=False))
-    except (RuntimeError, OSError, ValueError, KeyboardInterrupt) as error:
+    except (RuntimeError, OSError, ValueError, http.client.HTTPException, KeyboardInterrupt) as error:
         print("Cancelled" if isinstance(error, KeyboardInterrupt) else str(error), file=sys.stderr)
         raise SystemExit(1) from None
 

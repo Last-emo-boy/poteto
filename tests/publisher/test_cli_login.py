@@ -97,10 +97,10 @@ class CliLoginTests(unittest.TestCase):
 
         api = self.api
         class LocalClient(cli.Client):
-            def request(self, method, path, body=None, raw=False):
+            def request(self, method, path, body=None, raw=False, *, timeout=180):
                 headers = {"Authorization": "Bearer " + self.token} if self.token else {}
                 if raw:
-                    r = api.request(method, path, content=body, headers=headers | {"Content-Type": "application/gzip"})
+                    r = api.request(method, path, content=body, headers=headers | {"Content-Type": raw if isinstance(raw, str) else "application/gzip"})
                 else:
                     r = api.request(method, path, json=body, headers=headers)
                 if r.status_code >= 400:

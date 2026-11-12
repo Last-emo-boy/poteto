@@ -9,7 +9,7 @@ description: 用 Poteto CLI 把现有应用目录预检并发布到 Poteto 的 H
 
 ## 安装与凭据
 
-如果没有可用的 Poteto 0.11.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
+如果没有可用的 Poteto 0.12.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
 
 ```sh
 curl -fsSL https://poteto.iflink.tech/install.sh | sh
@@ -53,6 +53,7 @@ poteto deploy "$APP_DIR" --prebuilt --project "$PROJECT_ID" --preview --url-only
 远端预检的 `runtime_driver: "gvisor"` 表示平台将直接启动隔离容器，不使用构建 VM 或租户 VM。该通道需项目另行开通，只用于至少 256 MiB、无数据库/卷/迁移、无需外网访问的预览。休眠需项目再开通 `sandbox_sleep_projects`，之后 `sleep: true` 会由 Sablier 在空闲后停止、访问时等待健康检查再唤醒；未开通时保留原运行路径。沿用应用的实际需求，不为选用此通道删除数据绑定。配额满或隔离启动失败时处理错误，不退回无隔离运行。
 
 - Node 源码构建需要 npm 锁文件。动态应用须监听 `0.0.0.0` 上平台提供的 `PORT`；非 npm 构建可以使用 Dockerfile。预览数据库或卷由项目所有者预先创建和授权，沿用已有绑定。
+- CLI 0.12.0 配合新版服务端会自动分片上传，并在当前应用的 `.poteto/` 保存不含凭据的待上传成品。若上传中断，在同一目录执行 `poteto deploy . --project "$PROJECT_ID" --resume <发布 ID>`，沿用输出中的 ID；不要重新构建、添加 `--local-build`、更换目标或创建另一个发布。收到服务端已入队确认后，本地待上传副本会自动删除。
 - 预检失败时按 JSON 的 `error.code` 和 `error.message` 处理；不要绕过预检或改用生产发布。上传后失败时用 `poteto deployments --project "$PROJECT_ID"` 和 `poteto logs <发布 ID>` 定位，不盲目重复创建发布。
 
 只在 `deploy` 成功且返回的 HTTPS 地址可访问后，才交付预览链接。验证首页或应用实际配置的健康检查路径；验证共享数据时优先使用只读请求。不要把 token 或环境变量值放进回复。
