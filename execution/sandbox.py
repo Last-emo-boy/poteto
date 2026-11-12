@@ -387,7 +387,10 @@ def operation(root, config, release, body, build_status):
     if container is not None:
         owned(container["Config"]["Labels"], expected)
     if action == "inspect":
-        return {"container": {"State": {"Running": container["State"]["Running"]}} if container else None}
+        value = {"container": {"State": {"Running": container["State"]["Running"]}} if container else None}
+        if container:
+            value['http_port'] = sandbox_wake.PROXY_PORT if receipt.get('wake') else receipt['host_port']
+        return value
     if action == "logs":
         return {"log": docker("logs", "--tail", "200", name)[-65536:] if container else ""}
     if receipt.get("wake"):

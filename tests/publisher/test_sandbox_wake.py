@@ -60,6 +60,22 @@ class SandboxWakeTests(unittest.TestCase):
         self.assertLess(value.index('handle @r'), value.index('request_header @p'))
         self.assertIn('host ' + self.wake['hostname'], value)
 
+    def test_inspection_reports_owned_ingress_port_even_when_asleep(self):
+        records = self.root/'sandboxes'; records.mkdir()
+        account, project = 'b'*24, 'c'*24
+        ownership = sandbox.labels(self.release, account, project)
+        container = {'Config':{'Labels':ownership}, 'State':{'Running':False}}
+        body = {'action':'inspect','account_id':account,'project_id':project}
+        for wake, port in [(self.wake,23100), (None,23000)]:
+            record = self.record | {'account_id':account,'project_id':project,'wake':wake}
+            (records/(self.release+'.json')).write_text(json.dumps(record))
+            with patch.object(sandbox,'inspect',return_value=container):
+                result = sandbox.operation(self.root, {}, self.release, body, Mock())
+            self.assertEqual(port, result['http_port'])
+            self.assertFalse(result['container']['State']['Running'])
+        with patch.object(sandbox,'inspect',return_value=None):
+            self.assertNotIn('http_port', sandbox.operation(self.root, {}, self.release, body, Mock()))
+
     def test_retired_port_is_held_until_old_blocking_requests_expire(self):
         with patch.object(sandbox_wake, 'boot_id', return_value='boot'), patch.object(sandbox_wake.time, 'monotonic', return_value=10):
             sandbox_wake.quarantine(self.root, 23000)

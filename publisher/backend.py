@@ -334,6 +334,8 @@ class Dokploy:
         document["http"]["middlewares"]["publisher-host-" + project_id] = {"headers": {"customRequestHeaders": {"Host": preview}, "customResponseHeaders": {"X-Paas-Deployment": deployment["id"]}}}
         if deployment.get('runtime_driver') == SANDBOX_DRIVER:
             target = self.sandbox_action(deployment, 'inspect')
+            if type(target.get('http_port')) is not int:
+                raise BackendError('Upgrade the executor before routing sandbox production traffic')
             document['http']['services']['publisher-' + project_id]['loadBalancer']['servers'] = [
                 {'url':'http://10.201.0.2:' + str(target['http_port'])}]
             headers = {'X-Forwarded-Proto':'https', 'X-Forwarded-Host':self.hostname(deployment, production=True)}
