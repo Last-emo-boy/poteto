@@ -351,7 +351,7 @@ class Worker:
             self.backend.deploy(deployment, compose_id)
         self.state(deployment["id"], "deploying")
         self.backend.health(deployment, check=self.check)
-        if config["sleep"] and not artifact and not self.backend.target(deployment["id"]):
+        if config["sleep"] and not artifact and not sandbox and not self.backend.target(deployment["id"]):
             self.backend.refresh_wake()
         self.log(deployment, "HTTP health check passed")
         self.backend.public_health(deployment, check=self.check)

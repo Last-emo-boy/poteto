@@ -8,9 +8,10 @@ import re
 import socket
 import subprocess
 import tarfile
+from execution import sandbox_wake
 
 RUNTIME = "io.containerd.runsc.v1"
-PORTS = range(23000, 23032)
+PORTS = sandbox_wake.APP_PORTS
 ID = re.compile(r"[a-f0-9]{24}")
 ENV = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
 
@@ -111,12 +112,15 @@ class DockerSocket(http.client.HTTPConnection):
         self.sock.connect("/var/run/docker.sock")
 
 
-def create(name, image, port, host_port, memory, cpu, env, ownership):
+def create(name, image, port, host_port, memory, cpu, env, ownership, *, wake=None):
     key = f"{port}/tcp"
     body = {
         "Image": image, "User": "10001:10001", "Tty": True,
         "Env": [k + "=" + v for k, v in env.items()],
-        "Labels": ownership, "ExposedPorts": {key: {}}, "Healthcheck": {"Test": ["NONE"]},
+        "Labels": ownership | {"sablier.enable": str(bool(wake)).lower(),
+                               "sablierapp.dev/enable": str(bool(wake)).lower(),
+                               "sablier.group": name, "sablierapp.dev/group": name},
+        "ExposedPorts": {key: {}}, "Healthcheck": {"Test": ["NONE"]},
         "HostConfig": {
             "Runtime": RUNTIME, "CgroupParent": "paas-sandbox.slice", "NetworkMode": name,
             "Dns": ["127.0.0.1"], "PortBindings": {key: [{"HostIp": "127.0.0.1", "HostPort": str(host_port)}]},
@@ -127,6 +131,12 @@ def create(name, image, port, host_port, memory, cpu, env, ownership):
         },
         "NetworkingConfig": {"EndpointsConfig": {name: {}}},
     }
+    if wake:
+        body["Healthcheck"] = {"Test": ["CMD", "/poteto-healthcheck", f"http://127.0.0.1:{port}" + wake["health_check"]],
+                               "Interval": 2_000_000_000, "Timeout": 3_000_000_000,
+                               "StartPeriod": 2_000_000_000, "Retries": 30}
+        body["HostConfig"]["Mounts"] = [{"Type": "bind", "Source": str(sandbox_wake.HEALTHCHECK),
+                                        "Target": "/poteto-healthcheck", "ReadOnly": True}]
     conn = DockerSocket("localhost", timeout=25)
     try:
         conn.request("POST", "/containers/create?name=" + name, json.dumps(body).encode(),
@@ -144,6 +154,13 @@ def observe(container, spec):
     memory, cpu, port, _ = validate(spec)
     if limits["Runtime"] != RUNTIME or not limits["ReadonlyRootfs"] or limits["Privileged"]:
         raise ValueError("Effective sandbox configuration does not match")
+    if spec.get("sleep"):
+        mounts = container.get("Mounts", [])
+        test = ["CMD", "/poteto-healthcheck", f"http://127.0.0.1:{port}" + spec["health_check"]]
+        if (len(mounts) != 1 or mounts[0].get("Source") != str(sandbox_wake.HEALTHCHECK)
+                or mounts[0].get("Destination") != "/poteto-healthcheck" or mounts[0].get("RW")
+                or container["Config"]["Healthcheck"]["Test"] != test):
+            raise ValueError("Sandbox readiness probe is not isolated")
     bindings = container["NetworkSettings"]["Ports"].get(f"{port}/tcp", [])
     if bindings != [{"HostIp": "127.0.0.1", "HostPort": str(spec["host_port"])}]:
         raise ValueError("Sandbox ingress is not restricted to host loopback")
@@ -177,6 +194,10 @@ def operation(root, config, release, body, build_status):
         if config.get("sandbox_projects", {}).get(project) != account:
             raise ValueError("Project is not authorized for sandbox previews")
         memory, cpu, port, env = validate(body)
+        wake = sandbox_wake.options(release, body)
+        if wake and (config.get("sandbox_sleep_projects", {}).get(project) != account
+                     or not sandbox_wake.HEALTHCHECK.is_file()):
+            raise ValueError("Sandbox sleep is not provisioned for this project")
         build = root / "builds" / release
         spec = json.loads((build / "spec.json").read_text())
         image = "paas-release:" + release
@@ -191,14 +212,18 @@ def operation(root, config, release, body, build_status):
                         ["nft", "list", "table", "inet", "poteto_sandbox"]):
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
         if receipt is None:
-            used = {json.loads(p.read_text())["host_port"] for p in records.glob("*.json")}
+            used = {json.loads(p.read_text())["host_port"] for p in records.glob("*.json")} | sandbox_wake.unavailable(root)
             host_port = next((v for v in PORTS if v not in used), None)
             if host_port is None:
                 raise ValueError("No sandbox preview slot is available")
             if inspect("container", name) or inspect("network", name):
                 raise ValueError("Sandbox name is already in use")
             receipt = {"account_id": account, "project_id": project, "host_port": host_port}
+            if wake:
+                receipt["wake"] = wake
             save(path, receipt)
+        if receipt.get("wake") != wake:
+            raise ValueError("Sandbox wake configuration does not match its receipt")
         bridge = "psbx" + str(receipt["host_port"])
         network = inspect("network", name)
         flags = [item for k, v in expected.items() for item in ("--label", k + "=" + v)]
@@ -229,7 +254,10 @@ def operation(root, config, release, body, build_status):
                 raise ValueError("Sandbox preview image does not match its native export")
             if metadata["Config"].get("Volumes"):
                 raise ValueError("Sandbox preview cannot create anonymous volumes")
-            create(name, metadata["Id"], port, receipt["host_port"], memory, cpu, env, expected)
+            if wake and any(k.startswith(("sablier.", "sablierapp.dev/", "com.docker.compose."))
+                            for k in metadata["Config"].get("Labels", {}) or {}):
+                raise ValueError("Sleeping sandbox images cannot supply lifecycle labels")
+            create(name, metadata["Id"], port, receipt["host_port"], memory, cpu, env, expected, wake=wake)
             container = inspect("container", name)
         owned(container["Config"]["Labels"], expected)
         if not container["State"]["Running"]:
@@ -239,7 +267,11 @@ def operation(root, config, release, body, build_status):
         except Exception:
             docker("stop", "-t", "2", name)
             raise
-        return {"http_port": receipt["host_port"]}
+        if wake:
+            receipt["wake_ready"] = True
+            save(path, receipt)
+            sandbox_wake.configure(root, config, docker)
+        return {"http_port": sandbox_wake.PROXY_PORT if wake else receipt["host_port"]}
     if receipt is None:
         return {"container": None, "log": "", "deleted": True}
     container = inspect("container", name)
@@ -249,6 +281,11 @@ def operation(root, config, release, body, build_status):
         return {"container": {"State": {"Running": container["State"]["Running"]}} if container else None}
     if action == "logs":
         return {"log": docker("logs", "--tail", "200", name)[-65536:] if container else ""}
+    if receipt.get("wake"):
+        receipt["wake_ready"] = False
+        save(path, receipt)
+        sandbox_wake.configure(root, config, docker)
+        sandbox_wake.quarantine(root, receipt["host_port"])
     if container is not None:
         docker("rm", "-f", name)
     network = inspect("network", name)

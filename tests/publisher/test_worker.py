@@ -56,6 +56,16 @@ class WorkerTests(unittest.TestCase):
         self.backend.public_health.assert_called_once()
         self.assertFalse(self.worker.run_once())
 
+    def test_sleeping_sandbox_does_not_reconfigure_the_legacy_wake_proxy(self):
+        from dataclasses import replace
+        self.store.settings = replace(self.store.settings, sandbox_projects=(self.project,),
+                                      sandbox_sleep_projects=(self.project,))
+        deployment = self.queued({'runtime': 'node', 'target': 'preview', 'sleep': True})
+        self.assertTrue(self.worker.run_once())
+        self.assertEqual('ready', self.state(deployment['id']))
+        self.backend.publish_sandbox.assert_called_once()
+        self.backend.refresh_wake.assert_not_called()
+
     def test_failed_health_keeps_old_production(self):
         first = self.queued()
         self.worker.run_once()

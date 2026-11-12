@@ -185,7 +185,11 @@ The experimental gVisor path accepts stateless previews from trusted native buil
 
 For an eligible image preview, use `sleep: false`, at least 256 MiB memory, and no database, volume or migration binding, then run `poteto deploy . --local-build --preview`. The server normalizes the uploaded image and starts a gVisor container without either a build VM or tenant VM. Remote preflight reports `runtime_driver: "gvisor"`. Admission is bounded by the supplied sandbox slice's total 2 GiB memory and 1.5 CPU envelope, as well as normal account/platform quotas.
 
-Sandbox containers have loopback-only ingress, a read-only root filesystem, no host mounts and no outbound access. Data bindings, sleep and production continue to use the existing runtime. A sandbox preview that fails setup does not run unsandboxed; previews do not automatically start after an executor reboot. Existing releases retain their selected runtime.
+Sandbox containers have loopback-only ingress, a read-only root filesystem and no outbound access. Always-on previews have no host mounts. Data bindings and production continue to use the existing runtime; sleeping previews require the separate opt-in below. A sandbox preview that fails setup does not run unsandboxed. Existing releases retain their selected runtime.
+
+Sleeping sandbox previews are a separate opt-in: install `infra/execution/paas-sandbox-wake.service` and its `sandbox-wake.compose.yml`, provision the existing Caddy/Sablier images and a Linux/amd64 build of `infra/execution/healthcheck.go` at `/opt/paas-execution/healthcheck`, then add the project to the publisher's `sandbox_sleep_projects` list and the executor's `sandbox_sleep_projects` project-to-account map. Regenerate the executor egress policy for the private wake-proxy port. Existing sleeping releases keep their original runtime unless redeployed.
+
+With that opt-in, `sleep: true` keeps stateless previews on gVisor. Sablier stops them after two idle minutes and waits for the platform's HTTP health check before forwarding a new request; reading logs does not wake them. A sleeping container mounts only the fixed, read-only platform health-check executable, never application host data. Its stopped processes release working memory, while its admission reservation remains held so concurrent wake-ups cannot overbook the sandbox pool. Databases, persistent volumes and production remain on the existing runtime. Failed health checks do not fall back to an unsandboxed process.
 
 ## Develop
 

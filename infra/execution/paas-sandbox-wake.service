@@ -1,0 +1,17 @@
+[Unit]
+Description=On-demand wake proxy for Poteto gVisor previews
+After=docker.service paas-sandbox-network.service
+Requires=docker.service paas-sandbox-network.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/paas-execution
+ExecStartPre=/usr/bin/python3 -m execution.sandbox_wake prepare
+ExecStart=/usr/bin/docker compose -f /opt/paas-execution/infra/execution/sandbox-wake.compose.yml up -d --wait --wait-timeout 60
+ExecStartPost=/usr/bin/python3 -m execution.sandbox_wake reload
+ExecStop=/usr/bin/docker compose -f /opt/paas-execution/infra/execution/sandbox-wake.compose.yml stop
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target

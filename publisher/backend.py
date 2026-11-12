@@ -240,8 +240,9 @@ class Dokploy:
         self.build_output(deployment, config, archive, self.account(deployment), log, check,
                           native_only=config['runtime'] != 'image')
         port = config['port']
+        wake = {'sleep': True, 'hostname': self.hostname(deployment), 'health_check': config['health_check']} if config['sleep'] else {}
         record = self.sandbox_action(deployment, 'start', port=port, memory_mb=config['memory_mb'],
-                                     cpus=config['cpus'], environment=self.runtime_environment(deployment, port))
+                                     cpus=config['cpus'], environment=self.runtime_environment(deployment, port), **wake)
         check()
         self.forward_route(deployment, record)
         log('Started the preview in gVisor; no tenant runtime VM')

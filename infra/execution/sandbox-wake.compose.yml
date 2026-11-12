@@ -1,0 +1,44 @@
+name: poteto-sandbox-wake
+services:
+  proxy:
+    image: paas-wake-proxy:1
+    pull_policy: never
+    container_name: poteto-sandbox-wake-proxy
+    network_mode: host
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.25
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=16m, /config:size=16m, /data:size=16m]
+    volumes:
+      - /srv/ovh-paas-execution/sandbox-wake:/etc/caddy:ro
+      - /opt/paas-execution/healthcheck:/poteto-healthcheck:ro
+    healthcheck:
+      test: [CMD, /poteto-healthcheck, http://127.0.0.1:23102/config/]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+  sablier:
+    image: sablierapp/sablier:1.20.0
+    container_name: poteto-sandbox-sablier
+    restart: unless-stopped
+    mem_limit: 128m
+    cpus: 0.25
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs: [/tmp:size=16m]
+    ports: [127.0.0.1:23101:10000]
+    command:
+      - start
+      - --provider.name=docker
+      - --provider.reject-unlabeled-requests=true
+      - --provider.verify-enabled-on-expiration=true
+      - --provider.docker.honor-restart-policy=false
+      - --sessions.expiration-interval=5s
+      - --storage.file=/state/sessions.json
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /srv/ovh-paas-execution/sandbox-wake-state:/state
