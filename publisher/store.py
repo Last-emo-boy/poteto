@@ -476,10 +476,30 @@ class Store:
             db.execute("INSERT INTO jobs(id,project_id,kind,deployment_id,created,updated) VALUES(?,?,?,?,?,?)", (ident(), deployment["project_id"], "deploy", deployment_id, now, now))
             self.audit(db, actor, "deployment.upload", deployment_id)
 
-    def claim(self, owner, *, logs_only=False):
+    def claim(self, owner, *, logs_only=False, static_previews_only=False):
+        if logs_only and static_previews_only:
+            raise ValueError("A worker may use only one dedicated queue lane")
         now = time.time()
+        lane = "j.kind='runtime-logs'" if logs_only else "j.kind!='runtime-logs'"
+        params = [now, now]
+        if static_previews_only:
+            lane += """ AND j.kind='deploy' AND EXISTS (
+                SELECT 1 FROM deployments d WHERE d.id=j.deployment_id
+                AND d.runtime_driver=? AND json_extract(d.config,'$.target')='preview'
+                AND coalesce(json_extract(d.config,'$.build_command'),'')='')"""
+            params.append(ARTIFACT_DRIVER)
+        if not logs_only:
+            # The dedicated lane may proceed for another project, never while
+            # an active mutation already owns this project's deployment state.
+            lane += """ AND NOT EXISTS (
+                SELECT 1 FROM jobs current WHERE current.project_id=j.project_id
+                AND current.id!=j.id AND current.kind!='runtime-logs'
+                AND current.state='running' AND current.lease_until>=?)"""
+            params.append(now)
         with self.connection() as db:
-            job = db.execute("SELECT * FROM jobs WHERE ((state='queued' AND coalesce(lease_until,0)<?) OR (state='running' AND lease_until<?)) AND (kind='runtime-logs')=? ORDER BY created LIMIT 1", (now,now,logs_only)).fetchone()
+            job = db.execute("SELECT j.* FROM jobs j WHERE ((j.state='queued' AND coalesce(j.lease_until,0)<?) "
+                             "OR (j.state='running' AND j.lease_until<?)) AND " + lane +
+                             " ORDER BY j.created LIMIT 1", params).fetchone()
             if not job:
                 return None
             db.execute("UPDATE jobs SET state='running',owner=?,lease_until=?,attempts=attempts+1,updated=? WHERE id=?", (owner, now + 90, now, job["id"]))

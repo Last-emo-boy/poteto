@@ -175,3 +175,35 @@ class StaticArtifactTests(unittest.TestCase):
         with self.store.connection() as db:
             self.assertEqual(50, db.execute("SELECT count(*) FROM deployments WHERE state='ready'").fetchone()[0])
             self.assertEqual(0, db.execute("SELECT count(*) FROM execution_targets").fetchone()[0])
+
+    def test_prebuilt_preview_lane_runs_other_projects_while_source_builder_owns_its_project(self):
+        built = self.source_deployment()
+        same = self.deployment()
+        other_actor = self.store.authenticate(self.store.create_account('another')['token'])
+        other_project = self.store.create_project(other_actor, 'site')['id']
+        preview = self.store.create_deployment(other_actor, other_project,
+            DeploymentInput(target='preview').configuration(), None)
+        production = self.store.create_deployment(other_actor, other_project,
+            DeploymentInput(target='production').configuration(), None)
+        self.archive(preview, {'index.html': b'<p>fast preview</p>'})
+        with self.store.connection() as db:
+            for index, item in enumerate((built, same, preview, production)):
+                db.execute("UPDATE deployments SET state='queued' WHERE id=?", (item['id'],))
+                db.execute("INSERT INTO jobs(id,project_id,kind,deployment_id,created,updated) VALUES(?,?,'deploy',?,?,?)",
+                           (item['id'], item['project_id'], item['id'], index, index))
+        main_job = self.store.claim('main-worker')
+        self.assertEqual(built['id'], main_job['deployment_id'])
+        response = Mock(status=200)
+        response.getheader.return_value = preview['id']
+        with (patch.object(self.backend, 'execution_client') as executor,
+              patch('publisher.backend.http.client.HTTPConnection') as http,
+              patch('publisher.backend.http.client.HTTPSConnection', new=http)):
+            http.return_value.getresponse.return_value = response
+            lane = Worker(self.store, self.backend, static_previews_only=True)
+            self.assertTrue(lane.run_once())
+            self.assertFalse(lane.run_once())
+            executor.assert_not_called()
+        with self.store.connection() as db:
+            self.assertEqual({built['id']: 'running', same['id']: 'queued', preview['id']: 'completed',
+                              production['id']: 'queued'},
+                             dict(db.execute("SELECT deployment_id,state FROM jobs").fetchall()))

@@ -1,0 +1,20 @@
+[Unit]
+Description=Poteto fast lane for prebuilt static previews
+After=paas-publisher-worker.service
+Wants=paas-publisher-worker.service
+
+[Service]
+WorkingDirectory=/opt/paas-publisher
+Environment=PAAS_DATA=/var/lib/paas-publisher
+Environment=PAAS_BACKEND_CONFIG=/etc/paas-publisher/backend.json
+UMask=0007
+ExecStart=/opt/paas-publisher/.venv/bin/python -m publisher.worker --static-previews-only
+Restart=on-failure
+RestartSec=3
+TimeoutStopSec=90
+KillMode=mixed
+MemoryMax=256M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target

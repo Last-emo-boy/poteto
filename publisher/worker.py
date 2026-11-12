@@ -19,13 +19,14 @@ from publisher.store import ARTIFACT_DRIVER, SANDBOX_DRIVER, Store, ident
 
 
 class Worker:
-    def __init__(self, store, backend, *, logs_only=False):
+    def __init__(self, store, backend, *, logs_only=False, static_previews_only=False):
         self.store, self.backend = store, backend
         self.backend.store = store
         self.owner = socket.gethostname() + "-" + ident()
         self.job = None
         self.last_maintenance = 0
         self.logs_only = logs_only
+        self.static_previews_only = static_previews_only
 
     def guard(self, db, cancel=True):
         if self.job is None:
@@ -79,14 +80,15 @@ class Worker:
                 return
 
     def run_once(self):
-        if not self.logs_only and time.monotonic() - self.last_maintenance > 60:
+        if not (self.logs_only or self.static_previews_only) and time.monotonic() - self.last_maintenance > 60:
             self.store.expire_uploads()
             from publisher.project_exports import expire
             expire(self.store)
             from publisher.project_imports import expire as expire_imports
             expire_imports(self.store)
             self.last_maintenance = time.monotonic()
-        job = self.store.claim(self.owner,logs_only=self.logs_only)
+        job = self.store.claim(self.owner, logs_only=self.logs_only,
+                               static_previews_only=self.static_previews_only)
         if not job:
             return False
         self.job = job
@@ -305,9 +307,11 @@ class Worker:
             archive = self.store.settings.root / 'artifacts' / f"{deployment['id']}.tar.gz"
             if config.get('build_command'):
                 self.state(deployment['id'], 'building')
-                self.log(deployment, 'Building static files for direct hosting; no runtime VM')
+                restored = (imported or {}).get('built_path')
+                self.log(deployment, 'Restoring built static files; no build or runtime VM' if restored else
+                         'Building static files for direct hosting; no runtime VM')
                 self.backend.publish_artifact(deployment, archive, self.check,
-                    log=lambda text: self.log(deployment, text), restored=(imported or {}).get('built_path'))
+                    log=lambda text: self.log(deployment, text), restored=restored)
             else:
                 self.log(deployment, 'Publishing prebuilt static files; no build or runtime VM')
                 self.backend.publish_artifact(deployment, archive, self.check)
@@ -364,12 +368,15 @@ class Worker:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--once", action="store_true")
-    parser.add_argument('--logs-only',action='store_true')
+    lane = parser.add_mutually_exclusive_group()
+    lane.add_argument('--logs-only',action='store_true')
+    lane.add_argument('--static-previews-only',action='store_true')
     args = parser.parse_args()
     settings = Settings.from_env()
     store = Store(settings)
     config = json.loads(Path(os.environ["PAAS_BACKEND_CONFIG"]).read_text())
-    worker = Worker(store, Dokploy(config, settings),logs_only=args.logs_only)
+    worker = Worker(store, Dokploy(config, settings), logs_only=args.logs_only,
+                    static_previews_only=args.static_previews_only)
     stopping = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: stopping.set())
     signal.signal(signal.SIGINT, lambda *_: stopping.set())
