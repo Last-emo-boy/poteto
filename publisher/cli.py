@@ -27,6 +27,7 @@ if __package__:
     from . import cli_upload
     from . import cli_usage
     from . import cli_protection
+    from . import cli_logs
 else:
     from cli_login import default_token_file, login, logout
     from cli_tools import VERSION, PlanError, deployment_config, initialize, pack, plan_deployment
@@ -37,6 +38,7 @@ else:
     import cli_upload
     import cli_usage
     import cli_protection
+    import cli_logs
 
 
 class Client:
@@ -438,8 +440,11 @@ def main(prog="poteto"):
     logs = commands.add_parser("logs")
     logs.add_argument("deployment")
     logs.add_argument('--runtime',action='store_true',help='Read a bounded runtime stdout/stderr snapshot without waking the app')
-    logs.add_argument("--follow", action="store_true", help="Follow build logs until the release is ready")
-    logs.add_argument("--timeout", type=int, default=900, help="Maximum wait when using --follow")
+    logs.add_argument("--follow", action="store_true", help="Follow build logs, or runtime logs with --runtime")
+    logs.add_argument("--timeout", type=int, default=900, help="Maximum wait or runtime follow duration in seconds")
+    logs.add_argument('--tail', type=int, default=200, help='Initial runtime entries to read (0..200)')
+    logs.add_argument('--after', type=int, help='Resume runtime logs after this deployment cursor')
+    logs.add_argument('--jsonl', action='store_true', help='Emit runtime log entries as JSON Lines')
     for name in ['retry', 'cancel', 'delete']:
         command = commands.add_parser(name)
         command.add_argument('deployment')
@@ -505,8 +510,11 @@ def main(prog="poteto"):
             parser.error("--stdin is only used with env set and cannot be combined with --file")
         if args.env_action in {"list", "ls", "rm"} and args.file:
             parser.error("--file is only used for env set or legacy env replacement")
-    if args.command == "logs" and args.runtime and args.follow:
-        parser.error("--follow is for build logs, not runtime snapshots")
+    if args.command == 'logs':
+        if not args.runtime and (args.tail != 200 or args.after is not None or args.jsonl):
+            parser.error('--tail, --after and --jsonl require --runtime')
+        if not 0 <= args.tail <= 200 or args.timeout <= 0 or (args.after is not None and not 0 <= args.after <= 9223372036854775807):
+            parser.error('Logs require --tail 0..200, a positive --timeout and a non-negative 64-bit --after cursor')
     try:
         if args.command == "unlink":
             print(json.dumps(unlink(args.directory), indent=2))
@@ -759,18 +767,12 @@ def main(prog="poteto"):
             if not project_id:
                 parser.error("deployments requires --project PROJECT_ID when using a manual token")
             result = client.request("GET", f"/v1/projects/{project_id}/deployments")
+        elif args.command=='logs' and args.runtime:
+            result=cli_logs.runtime(client,args.deployment,follow=args.follow,timeout=args.timeout,
+                                    tail=args.tail,after=args.after,jsonl=args.jsonl)
+            if result is None:return
         elif args.command == "logs" and args.follow:
             result = client.wait(args.deployment, args.timeout)
-        elif args.command=='logs' and args.runtime:
-            path='/v1/deployments/'+args.deployment+'/runtime-logs'
-            result=client.request('GET',path)
-            deadline=time.monotonic()+45
-            while result['state'] in {'queued','running'}:
-                if time.monotonic()>deadline:
-                    raise RuntimeError('Runtime logs are still being collected; repeat this command to observe the same operation')
-                time.sleep(1)
-                result=client.request('GET',path)
-            if result['error']:raise RuntimeError(result['error'])
         elif args.command in {"status", "logs"}:
             path = "/v1/deployments/" + args.deployment + ("/logs" if args.command == "logs" else "")
             result = client.request("GET", path)

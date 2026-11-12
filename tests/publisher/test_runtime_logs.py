@@ -13,6 +13,7 @@ from publisher.config import Settings
 from publisher.container_logs import capture
 from publisher.worker import Worker
 from execution import runtime_rpc
+from publisher.runtime_logs import save
 
 
 class RuntimeLogTests(unittest.TestCase):
@@ -106,7 +107,70 @@ class RuntimeLogTests(unittest.TestCase):
             self.assertEqual(3,db.execute("SELECT count(*) FROM jobs WHERE kind='runtime-logs'").fetchone()[0])
             self.store.purge_release(db,self.release)
             self.assertEqual(0,db.execute('SELECT count(*) FROM runtime_logs').fetchone()[0])
+            self.assertEqual(0,db.execute('SELECT count(*) FROM runtime_log_entries').fetchone()[0])
+            self.assertEqual(0,db.execute('SELECT count(*) FROM runtime_log_heads').fetchone()[0])
             self.assertEqual(0,db.execute('SELECT count(*) FROM jobs').fetchone()[0])
+
+    def snapshot(self, text):
+        with self.store.connection() as db:save(db,self.release,text,time.time())
+
+    def test_cursor_deduplicates_overlap_and_preserves_repeated_lines(self):
+        self.snapshot('first\nsecond\n')
+        first=self.client.get(self.path).json()
+        self.assertEqual(2,first['next_cursor'])
+        self.snapshot('first\nsecond\n')
+        self.assertEqual([],self.client.get(self.path+'?after=2').json()['entries'])
+        self.snapshot('second\nthird\nthird\n')
+        delta=self.client.get(self.path+'?after=2').json()
+        self.assertEqual(['third\n','third\n'],[r['message'] for r in delta['entries']])
+        self.assertEqual('third\nthird\n',delta['log']);self.assertEqual(4,delta['next_cursor'])
+        self.assertFalse(delta['truncated'])
+
+    def test_tail_zero_and_cursor_survive_restart_without_replay(self):
+        self.snapshot('one\ntwo\nthree\n')
+        self.assertEqual('three\n',self.client.get(self.path+'?tail=1').json()['log'])
+        start=self.client.get(self.path+'?tail=0').json()
+        self.assertEqual([],start['entries']);self.assertEqual('',start['log']);self.assertEqual(3,start['next_cursor'])
+        app=create_app(Settings(self.root))
+        with TestClient(app,headers={'Authorization':'Bearer '+self.owner['token']}) as client:
+            self.assertEqual([],client.get(self.path+'?after=3').json()['entries'])
+
+    def test_rotated_log_emits_gap_and_evicted_cursor_is_explicit(self):
+        self.snapshot('old\n');self.snapshot('new\n')
+        result=self.client.get(self.path+'?after=1').json()
+        self.assertEqual(['gap','line'],[r['kind'] for r in result['entries']])
+        for index in range(210):self.snapshot(f'new\n{index}\n')
+        result=self.client.get(self.path+'?after=1').json()
+        self.assertTrue(result['truncated']);self.assertLessEqual(len(result['entries']),200)
+        with self.store.connection() as db:
+            size=db.execute('SELECT sum(length(CAST(message AS BLOB))) FROM runtime_log_entries').fetchone()[0]
+            self.assertLessEqual(size,65536)
+
+    def test_cursor_validation_does_not_queue_work(self):
+        for query in ['after=-1','after=9223372036854775808','tail=-1','tail=201','tail=abc']:
+            self.assertEqual(422,self.client.get(self.path+'?'+query).status_code)
+        self.assertEqual(409,self.client.get(self.path+'?after=1').status_code)
+        with self.store.connection() as db:self.assertEqual(0,db.execute('SELECT count(*) FROM jobs').fetchone()[0])
+
+    def test_stream_is_redacted_and_stays_bounded_for_multibyte_output(self):
+        self.client.get(self.path)
+        with self.store.connection() as db:
+            db.execute('UPDATE deployments SET environment=? WHERE id=?',(self.store.seal({'SECRET':'never-show'}),self.release))
+        backend=Mock();backend.runtime_logs.return_value='中'*30000+' never-show\n'
+        Worker(self.store,backend,logs_only=True).run_once()
+        result=self.client.get(self.path+'?after=0').json()
+        self.assertNotIn('never-show',json.dumps(result));self.assertIn('[REDACTED]',result['log'])
+        self.assertLessEqual(len(result['log'].encode()),65536)
+
+    def test_legacy_cached_snapshot_gets_cursor_on_first_refresh(self):
+        self.client.get(self.path)
+        backend=Mock();backend.runtime_logs.return_value='legacy\n'
+        Worker(self.store,backend,logs_only=True).run_once()
+        with self.store.connection() as db:
+            db.execute('DELETE FROM runtime_log_entries');db.execute('DELETE FROM runtime_log_heads')
+        response=self.client.get(self.path).json();self.assertEqual('queued',response['state'])
+        Worker(self.store,backend,logs_only=True).run_once()
+        self.assertEqual('legacy\n',self.client.get(self.path+'?after=0').json()['log'])
 
     def test_runtime_rpc_reads_stopped_container_without_starting_it(self):
         current={'Id':'a'*64,'State':{'Running':False}}

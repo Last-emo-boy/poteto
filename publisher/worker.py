@@ -113,11 +113,12 @@ class Worker:
                     self.finish(job)
                     return True
             if job['kind']=='runtime-logs':
+                from publisher.runtime_logs import save
                 text=self.redact(deployment,self.backend.runtime_logs(deployment))
-                text=text.encode()[-65536:].decode(errors='replace')
+                text=text.encode()[-65536:].decode(errors='ignore')
                 with self.store.connection() as db:
                     self.guard(db)
-                    db.execute('INSERT INTO runtime_logs VALUES(?,?,?) ON CONFLICT(deployment_id) DO UPDATE SET content=excluded.content,collected=excluded.collected',(deployment['id'],text,time.time()))
+                    save(db,deployment['id'],text,time.time())
             elif job['kind']=='project-delete':
                 self.delete_project(job)
                 return True

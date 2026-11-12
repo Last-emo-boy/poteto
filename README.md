@@ -79,6 +79,10 @@ Agents can follow the [Poteto preview skill](skills/poteto-deploy/SKILL.md) for 
 
 Use `poteto logs DEPLOYMENT_ID --follow` to watch a build as it runs, including a deployment started with `--no-wait`. Build output goes to stderr; the final deployment remains JSON on stdout.
 
+For application stdout/stderr after deployment, use `poteto logs DEPLOYMENT_ID --runtime`. Add `--follow --timeout 300` to watch for five minutes, or `--tail 0 --follow` to start with new entries only. Reading logs does not wake a sleeping application. The server refreshes bounded snapshots about every five seconds; it retains at most 200 entries / 64 KiB per deployment, not a permanent log archive. Rotation or an expired cursor produces an explicit gap notice.
+
+Agents can use `poteto logs DEPLOYMENT_ID --runtime --follow --jsonl` for JSON Lines. Each line includes the deployment ID and a cursor; resume with `--after CURSOR` on that same deployment. Brief transport interruptions resume from the last cursor. Expired credentials, a removed deployment, and TLS verification errors stop the command rather than retrying indefinitely. Plain `logs` and build `--follow` keep their existing behavior.
+
 ## Resume an interrupted upload
 
 CLI 0.12.0 and an updated server transfer artifacts in 2 MiB parts, with committed offsets and a complete-file integrity check before queueing the deployment. A dropped connection does not require uploading completed parts again.

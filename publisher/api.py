@@ -6,7 +6,7 @@ import secrets
 import time
 from pathlib import Path
 from typing import Literal
-from fastapi import Depends, FastAPI, Request
+from fastapi import Depends, FastAPI, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.exceptions import RequestValidationError
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -335,8 +335,10 @@ def create_app(settings=None):
         return {"logs": [dict(r) for r in rows], "next_cursor": rows[-1]["id"] if rows else after}
 
     @app.get('/v1/deployments/{deployment_id}/runtime-logs', tags=['Deployments'])
-    def runtime_logs(deployment_id: str, user=Depends(actor)):
-        """A bounded snapshot of the last 200 stdout/stderr lines; reading never wakes the app."""
+    def runtime_logs(deployment_id: str, after: int | None = Query(None, ge=0, le=9223372036854775807),
+                     tail: int = Query(200, ge=0, le=200), user=Depends(actor)):
+        """Bounded runtime snapshots and incremental cursors; reading never wakes the app."""
+        from publisher.runtime_logs import read
         with store.connection() as db:
             release=store.deployment(db,user,deployment_id,allow_preview=True)
             if not release['backend_id'] or release['state']=='deleting':
@@ -344,11 +346,14 @@ def create_app(settings=None):
             cached=db.execute('SELECT * FROM runtime_logs WHERE deployment_id=?',(deployment_id,)).fetchone()
             job=db.execute("SELECT * FROM jobs WHERE deployment_id=? AND kind='runtime-logs' ORDER BY created DESC LIMIT 1",(deployment_id,)).fetchone()
             project_state=db.execute('SELECT state FROM projects WHERE id=?',(release['project_id'],)).fetchone()[0]
+            stream=read(db,deployment_id,after,tail)
+            result={'log':cached['content'] if cached else '', 'collected':cached['collected'] if cached else None, **stream}
+            if after is not None or tail != 200:
+                result['log']=''.join(entry['message'] for entry in stream['entries'] if entry['kind']=='line')
             if (settings.root/'maintenance.json').exists() or project_state!='active':
-                return {'log':cached['content'] if cached else '', 'collected':cached['collected'] if cached else None,
-                        'job_id':None,'state':'paused','error':None}
+                return {**result,'job_id':None,'state':'paused','error':None}
             pending=job and job['state'] in {'queued','running'}
-            if not pending and (not job or job['updated']<time.time()-5):
+            if not pending and (not job or job['updated']<time.time()-5 or job['state']=='completed' and cached and cached['content'] and not stream['next_cursor']):
                 count=db.execute("SELECT count(*) FROM jobs j JOIN projects p ON j.project_id=p.id WHERE p.account_id=? AND j.kind='runtime-logs' AND j.state IN ('queued','running')",(user['account_id'],)).fetchone()[0]
                 if count>=5:raise Problem(429,'Runtime log collection concurrency limit reached')
                 # Snapshots are refreshable observations, not permanent release
@@ -357,8 +362,7 @@ def create_app(settings=None):
                 job_id,now=ident(),time.time()
                 db.execute("INSERT INTO jobs(id,project_id,kind,deployment_id,created,updated) VALUES(?,?,?,?,?,?)",(job_id,release['project_id'],'runtime-logs',deployment_id,now,now))
                 job={'id':job_id,'state':'queued','error':None}
-            return {'log':cached['content'] if cached else '', 'collected':cached['collected'] if cached else None,
-                    'job_id':job['id'],'state':job['state'],'error':job['error']}
+            return {**result,'job_id':job['id'],'state':job['state'],'error':job['error']}
 
     @app.get("/v1/deployments/{deployment_id}/source", tags=["Deployments"])
     def download_source(deployment_id: str, user=Depends(actor)):

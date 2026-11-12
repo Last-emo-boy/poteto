@@ -87,6 +87,12 @@ CREATE TABLE IF NOT EXISTS logs (
 CREATE TABLE IF NOT EXISTS runtime_logs (
  deployment_id TEXT PRIMARY KEY REFERENCES deployments(id), content TEXT NOT NULL,
  collected REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS runtime_log_heads (
+ deployment_id TEXT PRIMARY KEY REFERENCES deployments(id), cursor INTEGER NOT NULL);
+CREATE TABLE IF NOT EXISTS runtime_log_entries (
+ deployment_id TEXT NOT NULL REFERENCES deployments(id), cursor INTEGER NOT NULL,
+ kind TEXT NOT NULL, message TEXT NOT NULL, collected REAL NOT NULL,
+ PRIMARY KEY(deployment_id, cursor));
 CREATE TABLE IF NOT EXISTS project_exports (
  id TEXT PRIMARY KEY REFERENCES jobs(id), recipient TEXT NOT NULL, scopes TEXT NOT NULL,
  expires REAL NOT NULL, size INTEGER NOT NULL DEFAULT 0);
@@ -395,6 +401,8 @@ class Store:
         db.execute('UPDATE jobs SET deployment_id=NULL WHERE deployment_id=?', (deployment_id,))
         db.execute('DELETE FROM logs WHERE deployment_id=?', (deployment_id,))
         db.execute('DELETE FROM runtime_logs WHERE deployment_id=?', (deployment_id,))
+        db.execute('DELETE FROM runtime_log_entries WHERE deployment_id=?', (deployment_id,))
+        db.execute('DELETE FROM runtime_log_heads WHERE deployment_id=?', (deployment_id,))
         db.execute('DELETE FROM execution_targets WHERE deployment_id=?', (deployment_id,))
         db.execute('DELETE FROM deployments WHERE id=?', (deployment_id,))
 
