@@ -49,7 +49,7 @@ def main():
     parser.add_argument("command", choices=["create-account", "issue-owner-token", "retire-account", "set-storage-limit"])
     parser.add_argument("name")
     parser.add_argument("--output", type=Path)
-    parser.add_argument("--confirm-account", help="Exact account ID whose empty VM may be destroyed")
+    parser.add_argument("--confirm-account", help="Exact account ID to confirm the administrative operation")
     parser.add_argument("--mib", type=int, help="Account artifact storage limit in MiB")
     args = parser.parse_args()
     if args.command == "set-storage-limit":
