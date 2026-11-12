@@ -192,6 +192,12 @@ class ProductionLoginTests(unittest.TestCase):
         with self.app.state.store.connection() as db:
             self.assertEqual(0, db.execute('SELECT count(*) FROM tokens').fetchone()[0])
 
+class PortableProductionLoginTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.body = {'code':'test', 'verifier':'v'*43, 'nonce':'n'*43}
+
     def test_portable_client_checks_mode_before_browser_and_sends_explicit_flags(self):
         client = Mock(url='https://deploy.iflink.tech')
         output = self.root/'token.json'
