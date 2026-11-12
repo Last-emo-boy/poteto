@@ -375,8 +375,20 @@ def create_app(settings=None):
                 responses={202: {"description": "Resource deletion queued; poll job_id before assuming storage is freed"}})
     def delete_deployment(deployment_id: str, user=Depends(actor)):
         with store.connection() as db:
-            row = store.deployment(db, user, deployment_id, "deployments:write")
-            project = store.project(db, user, row["project_id"], "deployments:write")
+            preview = PREVIEW_SCOPE in user['scopes']
+            if preview:
+                store.permit(user,PREVIEW_MANAGE_SCOPE)
+                candidate=db.execute('SELECT d.config,d.preview_access FROM deployments d JOIN projects p ON p.id=d.project_id '
+                                     'WHERE d.id=? AND p.account_id=?',(deployment_id,user['account_id'])).fetchone()
+                if candidate and (not candidate['preview_access'] or json.loads(candidate['config'])['target']!='preview'):
+                    raise Problem(403,'Preview credentials cannot delete a production release')
+            row = store.deployment(db, user, deployment_id, "deployments:write",allow_preview=preview)
+            project = store.project(db, user, row["project_id"], "deployments:write",allow_preview=preview)
+            if preview:
+                if db.execute("SELECT 1 FROM jobs WHERE deployment_id=? AND kind IN ('promote','rollback')",(deployment_id,)).fetchone():
+                    raise Problem(409,'A published or rollback release cannot be deleted with preview credentials')
+                if any(json.loads(row['config']).get(field) for field in ('database_id','volume_id')):
+                    store.permit(user,PREVIEW_DATA_SCOPE,project['id'])
             if project["current_deployment"] == deployment_id:
                 raise Problem(409, "Promote another release before deleting the production release")
             if db.execute("SELECT 1 FROM uploads WHERE deployment_id=?", (deployment_id,)).fetchone():
@@ -396,6 +408,7 @@ def create_app(settings=None):
             db.execute("UPDATE deployments SET state='deleting',error=NULL,updated=? WHERE id=?", (now, deployment_id))
             db.execute("INSERT INTO jobs(id,project_id,kind,deployment_id,created,updated) VALUES(?,?,?,?,?,?)", (job_id,row["project_id"],"delete",deployment_id,now,now))
             store.audit(db, user, "deployment.delete", deployment_id)
+            if preview:store.audit(db,user,'preview.delete',job_id)
         return JSONResponse({"job_id": job_id, "deployment_id": deployment_id, "state": "deleting"}, status_code=202)
 
     def switch_release(project_id, body, user, kind):
@@ -436,13 +449,24 @@ def create_app(settings=None):
                 raise Problem(404, "Job not found")
             scope = 'deployments:read'
             if job['kind'] == 'delete' and PREVIEW_SCOPE in user['scopes']:
-                if not db.execute("SELECT 1 FROM audit WHERE account_id=? AND action='preview.prune' AND object_id=?",
+                if not db.execute("SELECT 1 FROM audit WHERE account_id=? AND action IN ('preview.prune','preview.delete') AND object_id=?",
                                   (user['account_id'], job_id)).fetchone():
                     raise Problem(404, 'Preview cleanup job not found')
                 scope = PREVIEW_MANAGE_SCOPE
             if job['kind']=='project-delete':scope='projects:write'
-            if job['kind']=='project-export':scope='exports:write'
-            if job['kind']=='project-import':scope='imports:write'
+            if job['kind']=='project-export':
+                scope='exports:write'
+                if job['preview_access'] and PREVIEW_SCOPE in user['scopes']:
+                    scope=PREVIEW_ENV_SCOPE
+                    export=db.execute('SELECT scopes FROM project_exports WHERE id=?',(job_id,)).fetchone()
+                    if export:
+                        for permission in json.loads(export['scopes']):store.permit(user,permission,job['project_id'])
+            if job['kind']=='project-import':
+                scope='imports:write'
+                if job['preview_access'] and PREVIEW_SCOPE in user['scopes']:
+                    from publisher.project_imports import lookup
+                    lookup(db,store,user,job_id)
+                    scope=PREVIEW_ENV_SCOPE
             if job['kind'].startswith(('database-', 'volume-')):
                 from publisher.data_store import DataStore
                 scope = DataStore.scope(job['kind'].split('-')[0])

@@ -140,6 +140,12 @@ class ExecutionClient:
                 'Content-Type':'application/octet-stream','Content-Length':str(Path(payload).stat().st_size),
                 'X-Paas-Restore-Spec':base64.urlsafe_b64encode(json.dumps(spec).encode()).decode()},timeout=960)
 
+    def restore_native_database(self,account_id,spec,payload):
+        with Path(payload).open('rb') as source:
+            return self.request('POST','/v1/databases/'+spec['resource_id']+'/restore',source,{
+                'Content-Type':'application/octet-stream','Content-Length':str(Path(payload).stat().st_size),
+                'X-Paas-Restore-Spec':base64.urlsafe_b64encode(json.dumps(spec|{'account_id':account_id}).encode()).decode()},timeout=960)
+
     def stream_export(self,method,path,output,limit,check,*,body=None,headers=None):
         connection=http.client.HTTPConnection('10.201.0.2',21999,timeout=440)
         request_headers={'Authorization':'Bearer '+self.config['token'],'Content-Type':'application/json'}|(headers or {})

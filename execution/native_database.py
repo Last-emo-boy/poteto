@@ -138,7 +138,9 @@ class NativeDatabase:
                 'address':record.get('address'),'memory_mb':MEMORY_MIB,'cpus':VCPUS,
                 'storage_bytes':self.storage.owner['bytes'],'ready':record['phase']=='ready'}
 
-    def ensure(self, admin_password, app_password):
+    def ensure(self, admin_password, app_password, *, import_id=None):
+        if import_id is not None:
+            checked(import_id)
         if not all(isinstance(value,str) and PASSWORD.fullmatch(value) for value in (admin_password,app_password)):
             raise ValueError('Use generated native database credentials')
         record = self.read()
@@ -161,6 +163,8 @@ class NativeDatabase:
             record = {'resource_id':self.resource,'account_id':self.account,'project_id':self.project,
                       'slot':slot,'image_id':details['Id'],'phase':'starting','memory_mb':MEMORY_MIB,
                       'cpus':VCPUS,'admin_password':admin_password,'app_password':app_password}
+            if import_id is not None:
+                record['import_id']=import_id
             atomic_json(self.path,record)
         else:
             sandbox.check_pool(self.root,self.config,self.resource,MEMORY_MIB,VCPUS)
@@ -168,6 +172,8 @@ class NativeDatabase:
             raise ValueError('Finish deleting the native database before provisioning again')
         if (record['admin_password'],record['app_password']) != (admin_password,app_password):
             raise ValueError('Database credentials do not match its existing receipt')
+        if record.get('import_id') != import_id:
+            raise ValueError('Database import ownership does not match its receipt')
         self.storage.prepare()
         os.chown(self.storage.mountpoint,70,70)
         self.ensure_network(record)
@@ -276,7 +282,7 @@ def operation(root, config, resource_id, body, *, admit):
     database = NativeDatabase(root, config, resource_id, body.get('account_id'), body.get('project_id'), admit=admit)
     action = body.get('action')
     if action == 'ensure':
-        return database.ensure(body.get('admin_password'), body.get('app_password'))
+        return database.ensure(body.get('admin_password'), body.get('app_password'), import_id=body.get('import_id'))
     if action == 'delete':
         return database.remove()
     if action == 'inspect':
@@ -300,7 +306,7 @@ def reconcile(root, config, *, admit, stop=False):
             elif record['phase'] == 'deleting':
                 result['deleting'].append(resource)
             else:
-                database.ensure(record['admin_password'], record['app_password'])
+                database.ensure(record['admin_password'], record['app_password'], import_id=record.get('import_id'))
                 result['ready'].append(resource)
         except (OSError, ValueError, subprocess.SubprocessError):
             # One broken database must not prevent recovery of other projects.

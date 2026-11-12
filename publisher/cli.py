@@ -146,7 +146,7 @@ class Client:
         os.link(partial,destination);partial.unlink()
         return {'id':operation,'bytes':total,'output':str(destination)}
 
-    def import_bundle(self,*,project=None,operation=None,bundle,identity,age,wait=True):
+    def import_bundle(self,*,project=None,operation=None,bundle,identity,age,wait=True,target=None):
         import re
         import tempfile
         import urllib.parse
@@ -177,8 +177,12 @@ class Client:
                 if manifest['format']!=FORMAT or not re.fullmatch(r'[a-f0-9]{24}',bundle_id) or not set(kinds)<={'database','volume'}:
                     raise ValueError('Unsupported bundle')
             except (zipfile.BadZipFile,KeyError,TypeError,ValueError):raise ValueError('Invalid authenticated project bundle') from None
+            body={'bundle_id':bundle_id,'size':size,'kinds':kinds}
+            if target is not None:body['target']=target
             status=(self.request('GET','/v1/imports/'+operation) if operation else
-                    self.request('POST','/v1/projects/'+project+'/imports',{'bundle_id':bundle_id,'size':size,'kinds':kinds}))
+                    self.request('POST','/v1/projects/'+project+'/imports',body))
+            if target is not None and status.get('target')!=target:
+                raise RuntimeError('This import does not match the requested target')
             operation=status['id'];path='/v1/imports/'+operation
             if status['bundle_id']!=bundle_id or status['size']!=size:raise RuntimeError('This bundle does not match the resumable import')
             if status['state']=='uploading':
@@ -365,6 +369,7 @@ def main(prog="poteto"):
     export_create=actions.add_parser('create');export_create.add_argument('project')
     export_create.add_argument('--recipient',required=True,help='Public age X25519 recipient, never a private identity')
     export_create.add_argument('--quiesce',action='store_true',help='Allow a bounded pause of apps while copying databases and files')
+    export_create.add_argument('--deployment',help='Export this unpublished preview ID or URL instead of production')
     export_create.add_argument('--no-wait',action='store_true')
     for action in ['status','download','delete']:
         entry=actions.add_parser(action);entry.add_argument('export_id')
@@ -375,6 +380,7 @@ def main(prog="poteto"):
         if action in {'create','resume'}:
             entry.add_argument('bundle',type=Path);entry.add_argument('--identity',type=Path,required=True)
             entry.add_argument('--age',default=os.environ.get('PAAS_AGE','age'));entry.add_argument('--no-wait',action='store_true')
+            entry.add_argument('--preview',action='store_true',help='Restore only preview configuration and data into an empty personal project')
     deploy = commands.add_parser("deploy")
     deploy.add_argument("directory", type=Path, nargs="?", default=Path("."))
     deploy.add_argument("--project", help="Project ID (defaults to the project from poteto login)")
@@ -603,7 +609,12 @@ def main(prog="poteto"):
                 if not args.no_wait:result=client.wait_job(result['job_id'])
         elif args.command=='export':
             if args.export_action=='create':
-                result=client.request('POST','/v1/projects/'+args.project+'/exports',{'recipient':args.recipient,'quiesce':args.quiesce})
+                body={'recipient':args.recipient,'quiesce':args.quiesce}
+                if args.deployment:
+                    kind,identifier=deployment_reference(args.deployment)
+                    if kind!='deployment':raise ValueError('Export a preview URL, not a production application URL')
+                    body['deployment_id']=identifier
+                result=client.request('POST','/v1/projects/'+args.project+'/exports',body)
                 if not args.no_wait:
                     client.wait_job(result['id']);result=client.request('GET','/v1/exports/'+result['id'])
             elif args.export_action=='download':result=client.download_export(args.export_id,args.output)
@@ -611,7 +622,8 @@ def main(prog="poteto"):
         elif args.command=='import':
             if args.import_action in {'create','resume'}:
                 target={'project':args.target} if args.import_action=='create' else {'operation':args.target}
-                result=client.import_bundle(**target,bundle=args.bundle,identity=args.identity,age=args.age,wait=not args.no_wait)
+                result=client.import_bundle(**target,bundle=args.bundle,identity=args.identity,age=args.age,wait=not args.no_wait,
+                                            **({'target':'preview'} if args.preview else {}))
             else:
                 path='/v1/imports/'+args.target
                 result=client.request('POST',path+'/retry') if args.import_action=='retry' else client.request('DELETE' if args.import_action=='delete' else 'GET',path)

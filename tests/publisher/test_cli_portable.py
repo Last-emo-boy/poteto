@@ -11,7 +11,7 @@ import tarfile
 import tempfile
 from threading import Thread
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import parse_qs, urlencode, urlsplit
 from urllib.error import URLError
 from urllib.request import urlopen
@@ -213,3 +213,30 @@ class PortableClientTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ArchiveCliTests(unittest.TestCase):
+    def command(self, arguments):
+        client=Mock(url='https://deploy.iflink.tech')
+        client.request.return_value={'id':'a'*24}
+        client.import_bundle.return_value={'id':'a'*24}
+        output=io.StringIO()
+        with patch.dict(os.environ,{'POTETO_TOKEN':'synthetic-cli-secret','POTETO_URL':'https://deploy.iflink.tech'}), \
+             patch.object(cli,'_credential_file',return_value=None),patch.object(cli,'find_link',return_value=None), \
+             patch.object(cli,'Client',return_value=client),patch('sys.argv',['poteto',*arguments]),redirect_stdout(output):
+            cli.main()
+        self.assertNotIn('synthetic-cli-secret',output.getvalue())
+        return client
+
+    def test_preview_export_resolves_url_to_the_release_identifier(self):
+        release='b'*24
+        client=self.command(['export','create','c'*24,'--recipient','age1'+'a'*58,
+                             '--deployment','https://preview-'+release+'.page.iflink.tech','--no-wait'])
+        self.assertEqual(release,client.request.call_args.args[2]['deployment_id'])
+
+    def test_preview_import_is_explicit_and_legacy_default_stays_omitted(self):
+        args=['import','create','c'*24,'backup.age','--identity','identity.txt','--no-wait']
+        client=self.command(args+['--preview'])
+        self.assertEqual('preview',client.import_bundle.call_args.kwargs['target'])
+        client=self.command(args)
+        self.assertNotIn('target',client.import_bundle.call_args.kwargs)

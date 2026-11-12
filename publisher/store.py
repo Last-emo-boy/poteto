@@ -130,6 +130,10 @@ class Store:
                 db.execute('ALTER TABLE jobs ADD COLUMN preview_access INTEGER NOT NULL DEFAULT 0')
             if 'runtime_driver' not in {r['name'] for r in db.execute('PRAGMA table_info(data_resources)')}:
                 db.execute('ALTER TABLE data_resources ADD COLUMN runtime_driver TEXT')
+            if 'destination_target' not in {r['name'] for r in db.execute('PRAGMA table_info(project_imports)')}:
+                db.execute("ALTER TABLE project_imports ADD COLUMN destination_target TEXT NOT NULL DEFAULT 'production'")
+            if 'web_access' not in {r['name'] for r in db.execute('PRAGMA table_info(project_imports)')}:
+                db.execute('ALTER TABLE project_imports ADD COLUMN web_access INTEGER NOT NULL DEFAULT 0')
             if 'state' not in {r['name'] for r in db.execute('PRAGMA table_info(projects)')}:
                 db.execute("ALTER TABLE projects ADD COLUMN state TEXT NOT NULL DEFAULT 'active'")
             if 'preview_environment' not in {r['name'] for r in db.execute('PRAGMA table_info(projects)')}:

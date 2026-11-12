@@ -20,7 +20,7 @@ from publisher.data_backend import DataBackend
 from publisher.data_store import DataStore
 from publisher.models import Input
 from publisher.project_bundle import BUNDLE_LIMIT,DATA_LIMIT,ID,BundleError,open_zip,unpack_bundle
-from publisher.store import ARTIFACT_DRIVER,Problem,encode,ident
+from publisher.store import ARTIFACT_DRIVER,SANDBOX_DRIVER,NATIVE_DATABASE_DRIVER,PREVIEW_SCOPE,PREVIEW_ENV_SCOPE,PREVIEW_DATA_SCOPE,PREVIEW_WEB_SCOPE,Problem,encode,ident
 from publisher.transfer_wire import CHUNK
 
 TTL=86400
@@ -32,6 +32,7 @@ class ImportInput(Input):
     bundle_id: ID
     size: int=Field(ge=1,le=BUNDLE_LIMIT)
     kinds: list[Literal['database','volume']]=Field(default_factory=list,max_length=2)
+    target: Literal['production','preview']='production'
 
 
 def payload_dir(store,operation):return store.settings.root/'imports'/operation
@@ -45,29 +46,38 @@ def remaining_space(db,now):
         "SELECT i.size,i.received FROM project_imports i JOIN jobs j ON j.id=i.id WHERE (j.state IN ('uploading','failed') AND i.expires>?) OR j.state IN ('queued','running')",(now,)))
 
 
-def scopes(kinds):return BASE_SCOPES|{DataStore.scope(kind) for kind in kinds}
+def scopes(kinds,target='production'):
+    if target=='preview':
+        return {PREVIEW_SCOPE,PREVIEW_ENV_SCOPE}|({PREVIEW_DATA_SCOPE} if kinds else set())
+    return BASE_SCOPES|{DataStore.scope(kind) for kind in kinds}
 
 
 def view(row,store):
     return {k:row[k] for k in ('id','project_id','bundle_id','size','received','state','error','deployment_id','expires')}|{
-        'job_id':row['id'],'chunk_limit':CHUNK,'url':'https://'+store.settings.hostname(row['project_id'],domain=row['app_domain']) if row['state']=='completed' else None}
+        'job_id':row['id'],'chunk_limit':CHUNK,'target':row['destination_target'],
+        'url':'https://'+store.settings.hostname(row['project_id'],row['deployment_id'] if row['destination_target']=='preview' else None,
+                                               domain=row['app_domain']) if row['state']=='completed' else None}
 
 
 def lookup(db,store,actor,operation):
     row=db.execute('SELECT i.*,j.state,j.error,j.project_id,j.deployment_id FROM project_imports i JOIN jobs j ON j.id=i.id WHERE i.id=?',(operation,)).fetchone()
     if row is None:raise Problem(404,'Import not found')
-    project=store.project(db,actor,row['project_id'],'imports:write',allow_inactive=True)
+    project=store.project(db,actor,row['project_id'],'imports:write',allow_inactive=True,allow_preview=row['destination_target']=='preview')
     if project['state']!='active':raise Problem(404,'Import not found')
-    for scope in scopes(json.loads(row['kinds'])):store.permit(actor,scope,project['id'])
+    for scope in scopes(json.loads(row['kinds']),row['destination_target']):store.permit(actor,scope,project['id'])
     return dict(row)|{'app_domain':project['app_domain']}
 
 
 def create(store,actor,project_id,body):
     with store.connection() as db:
-        project=store.project(db,actor,project_id,'imports:write')
-        if project['preview_mode'] == 'isolated':
+        project=store.project(db,actor,project_id,'imports:write',allow_preview=body.target=='preview')
+        if project['preview_mode'] == 'isolated' and body.target!='preview':
             raise Problem(422, 'Restore production bundles into a managed project, not a stateless personal preview')
-        for scope in scopes(body.kinds):store.permit(actor,scope,project_id)
+        if body.target=='preview' and (project['preview_mode']!='isolated' or 'volume' in body.kinds):
+            raise Problem(422,'Preview restore requires a personal project without volume resources')
+        if body.target=='preview' and (not store.settings.personal_previews or ('database' in body.kinds and not store.settings.native_databases)):
+            raise Problem(503,'The requested preview restore runtime is not enabled')
+        for scope in scopes(body.kinds,body.target):store.permit(actor,scope,project_id)
         if project['current_deployment'] or any(store.environment(project,target) for target in ('production','preview')) or db.execute('SELECT 1 FROM deployments WHERE project_id=?',(project_id,)).fetchone() or db.execute('SELECT 1 FROM data_resources WHERE project_id=?',(project_id,)).fetchone():
             raise Problem(409,'Import requires an empty destination without releases, data or environment values')
         if db.execute("SELECT 1 FROM jobs WHERE project_id=? AND state IN ('uploading','queued','running')",(project_id,)).fetchone():
@@ -78,8 +88,10 @@ def create(store,actor,project_id,body):
         needed=HEADROOM+2*body.size+(4*body.size+2)//3+1024**2+exports*BUNDLE_LIMIT
         if shutil.disk_usage(store.settings.root).free<needed:raise Problem(507,'Control plane cannot reserve encrypted parts and restore workspace')
         operation=ident();payload_dir(store,operation).mkdir(mode=0o700)
-        db.execute("INSERT INTO jobs(id,project_id,kind,state,created,updated) VALUES(?,?,?,'uploading',?,?)",(operation,project_id,'project-import',now,now))
-        db.execute('INSERT INTO project_imports(id,bundle_id,kinds,size,expires) VALUES(?,?,?,?,?)',(operation,body.bundle_id,encode(sorted(set(body.kinds))),body.size,now+TTL))
+        db.execute("INSERT INTO jobs(id,project_id,kind,state,created,updated,preview_access) VALUES(?,?,?,'uploading',?,?,?)",(operation,project_id,'project-import',now,now,body.target=='preview'))
+        db.execute('INSERT INTO project_imports(id,bundle_id,kinds,size,expires,destination_target,web_access) VALUES(?,?,?,?,?,?,?)',
+                   (operation,body.bundle_id,encode(sorted(set(body.kinds))),body.size,now+TTL,body.target,
+                    bool({'*',PREVIEW_WEB_SCOPE}&set(actor['scopes']))))
         store.audit(db,actor,'project.import',operation)
         return view(lookup(db,store,actor,operation),store)
 
@@ -247,11 +259,21 @@ def allocate(worker,job,row,manifest,account,source_size,expanded):
         used = store.storage_used(db,account)
         if used+source_size+expanded>quota['max_storage']:raise Problem(429,'Artifact storage quota reached')
         config=manifest.configuration.configuration()
-        if config['target']=='preview' and (config.get('database_id') or config.get('volume_id')):
+        preview=row['destination_target']=='preview'
+        if not preview and config['target']=='preview' and (config.get('database_id') or config.get('volume_id')):
             raise BundleError('A preview with data cannot become the imported production release')
-        config['target']='production'
+        if preview and (config['target']!='preview' or manifest.project_environment or
+                        any(r.stage!='preview' or r.kind!='database' for r in manifest.resources)):
+            raise BundleError('Preview restore cannot include production configuration, environment or data')
+        if preview and config.get('outbound_network')=='web' and (not row['web_access'] or not store.settings.sandbox_web):
+            raise BundleError('Restoring web access requires explicit web permission and an enabled platform')
+        config['target']=row['destination_target']
         driver=ARTIFACT_DRIVER if manifest.static_artifact and store.settings.artifact_enabled(
-            project,config,restored=manifest.built_static) else None
+            project,config,restored=manifest.built_static,personal=preview) else None
+        if preview and not driver and store.settings.sandbox_enabled(project,config,personal=True):
+            driver=SANDBOX_DRIVER
+        if preview and driver is None:
+            raise BundleError('Preview restore requires a supported static artifact or prebuilt image')
         if manifest.built_static and driver is None:
             raise BundleError('Enable direct static artifact hosting for the destination before restoring this project')
         mapping={r.id:data.allocate(db,account,project,r.kind,r.stage,import_id=operation) for r in manifest.resources}
@@ -259,8 +281,8 @@ def allocate(worker,job,row,manifest,account,source_size,expanded):
             if field in config:config[field]=mapping[config[field]]
         store.check_runtime_capacity(db,account,config,driver=driver)
         now=time.time()
-        db.execute("INSERT INTO deployments(id,project_id,state,config,environment,artifact_bytes,unpacked_bytes,created,updated,runtime_driver) VALUES(?,?,'building',?,?,?,?,?,?,?)",
-            (operation,project,encode(config),store.seal(manifest.release_environment),source_size,expanded,now,now,driver))
+        db.execute("INSERT INTO deployments(id,project_id,state,config,environment,artifact_bytes,unpacked_bytes,created,updated,runtime_driver,preview_access) VALUES(?,?,'building',?,?,?,?,?,?,?,?)",
+            (operation,project,encode(config),store.seal(manifest.release_environment),source_size,expanded,now,now,driver,preview))
         db.execute('UPDATE jobs SET deployment_id=? WHERE id=?',(operation,operation))
         db.execute('UPDATE project_imports SET resource_map=? WHERE id=?',(encode(mapping),operation))
         return dict(db.execute('SELECT * FROM deployments WHERE id=?',(operation,)).fetchone()),mapping
@@ -310,7 +332,8 @@ def apply(worker,job,row,project,stage):
             payload=stage/'resource.bin'
             try:
                 resource_payload(content/'data.zip',resource,payload);worker.check()
-                data.client.restore_data(account,{'operation':operation,'project_id':project['id'],'resource_id':target['id'],'kind':resource.kind},payload)
+                restore=data.client.restore_native_database if target['runtime_driver']==NATIVE_DATABASE_DRIVER else data.client.restore_data
+                restore(account,{'operation':operation,'project_id':project['id'],'resource_id':target['id'],'kind':resource.kind},payload)
             finally:payload.unlink(missing_ok=True)
             with store.connection() as db:
                 worker.guard(db)
@@ -319,17 +342,21 @@ def apply(worker,job,row,project,stage):
         worker.guard(db)
         env=DataStore(store).bind_resources(db,project['id'],json.loads(release['config']),dict(manifest.release_environment))
         db.execute('UPDATE deployments SET environment=? WHERE id=?',(store.seal(env),operation))
-        release=dict(db.execute('SELECT * FROM deployments WHERE id=?',(operation,)).fetchone())|{'app_domain':project['app_domain']}
+        release=dict(db.execute('SELECT * FROM deployments WHERE id=?',(operation,)).fetchone())|{'app_domain':project['app_domain'],'preview_mode':project['preview_mode']}
     if release['state']!='ready':
         worker.deploy(job,release,imported={
             'image_path':None if manifest.legacy_static or manifest.static_artifact else content/'image.tar',
             'built_path':content/'static.tar.gz' if manifest.built_static else None,
-            'reference':manifest.image})
+            'reference':manifest.image,'skip_migration':row['destination_target']=='preview'})
     with store.connection() as db:
         worker.guard(db)
-        db.execute('UPDATE projects SET environment=?,preview_environment=? WHERE id=?',
-                   (store.seal(manifest.project_environment),
-                    store.seal(manifest.preview_environment) if manifest.preview_environment else None,project['id']))
+        if row['destination_target']=='preview':
+            db.execute('UPDATE projects SET preview_environment=? WHERE id=?',
+                       (store.seal(manifest.preview_environment) if manifest.preview_environment else None,project['id']))
+        else:
+            db.execute('UPDATE projects SET environment=?,preview_environment=? WHERE id=?',
+                       (store.seal(manifest.project_environment),
+                        store.seal(manifest.preview_environment) if manifest.preview_environment else None,project['id']))
         db.execute("UPDATE jobs SET state='completed',error=NULL,updated=?,lease_until=NULL WHERE id=? AND owner=?",(time.time(),operation,worker.owner))
 
 

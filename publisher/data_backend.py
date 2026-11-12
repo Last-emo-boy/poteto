@@ -39,10 +39,9 @@ class DataBackend:
     def create(self,resource,check,*,import_id=None):
         account=self.account(resource['project_id'])
         if resource.get('runtime_driver') == NATIVE_DATABASE_DRIVER:
-            if import_id:
-                raise BackendError('Native database imports are not enabled yet')
             check()
             credentials=self.store.unseal(resource['definition'])
+            if import_id:credentials['import_id']=import_id
             result=self.client.native_database(account,resource['id'],resource['project_id'],'ensure',**credentials)
             check()
             return result

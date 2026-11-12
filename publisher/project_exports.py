@@ -14,9 +14,9 @@ from pydantic import Field
 from publisher.backend import BackendError
 from publisher.data_store import DataStore
 from publisher.models import Input
-from publisher.project_bundle import BUNDLE_LIMIT,FORMAT
+from publisher.project_bundle import BUNDLE_LIMIT,FORMAT,ID
 from publisher.static_artifacts import BUILT_LIMIT, built_archive
-from publisher.store import ARTIFACT_DRIVER, Problem, ident
+from publisher.store import ARTIFACT_DRIVER, SANDBOX_DRIVER, NATIVE_DATABASE_DRIVER, PREVIEW_SCOPE, PREVIEW_ENV_SCOPE, PREVIEW_DATA_SCOPE, Problem, ident
 
 AGE=Path('/opt/paas-publisher/age')
 LIMIT=BUNDLE_LIMIT
@@ -28,6 +28,7 @@ MANAGED={'DATABASE_URL','PORT','PAAS_DATA_DIR','PAAS_DEPLOYMENT_URL','PAAS_PROJE
 class ExportInput(Input):
     recipient: str=Field(pattern=r'^age1[023456789acdefghjklmnpqrstuvwxyz]{58}$')
     quiesce: bool=False
+    deployment_id: ID | None=None
 
 
 def directory(store):return store.settings.root/'exports'
@@ -41,9 +42,9 @@ def view(row):
 
 
 def export_row(db,store,actor,operation):
-    row=db.execute('SELECT e.*,j.state,j.error,j.project_id FROM project_exports e JOIN jobs j ON j.id=e.id WHERE e.id=?',(operation,)).fetchone()
+    row=db.execute('SELECT e.*,j.state,j.error,j.project_id,j.preview_access FROM project_exports e JOIN jobs j ON j.id=e.id WHERE e.id=?',(operation,)).fetchone()
     if row is None:raise Problem(404,'Export not found')
-    project=store.project(db,actor,row['project_id'],'exports:write',allow_inactive=True)
+    project=store.project(db,actor,row['project_id'],'exports:write',allow_inactive=True,allow_preview=bool(row['preview_access']))
     if project['state']!='active':raise Problem(404,'Export not found')
     for scope in json.loads(row['scopes']):store.permit(actor,scope,project['id'])
     if row['expires']<=time.time() and row['state'] not in {'queued','running'}:raise Problem(410,'Export has expired')
@@ -52,16 +53,28 @@ def export_row(db,store,actor,operation):
 
 def create(store,actor,project_id,body):
     with store.connection() as db:
-        project=store.project(db,actor,project_id,'exports:write')
-        scopes={'deployments:write','env:write'}
-        resources=db.execute('SELECT kind,state FROM data_resources WHERE project_id=?',(project_id,)).fetchall()
-        scopes.update(DataStore.scope(r['kind']) for r in resources)
+        preview=body.deployment_id is not None
+        project=store.project(db,actor,project_id,'exports:write',allow_preview=preview)
+        if preview:
+            release=store.deployment(db,actor,body.deployment_id,'exports:write',allow_preview=True)
+            if (release['project_id']!=project_id or release['state']!='ready' or not release['preview_access']
+                    or json.loads(release['config'])['target']!='preview' or project['current_deployment']==release['id']
+                    or db.execute("SELECT 1 FROM jobs WHERE deployment_id=? AND kind IN ('promote','rollback')",(release['id'],)).fetchone()):
+                raise Problem(409,'Choose an unpublished ready preview from this project')
+        else:
+            release=db.execute("SELECT id FROM deployments WHERE id=? AND project_id=? AND state='ready'",(project['current_deployment'],project_id)).fetchone()
+            if not release:raise Problem(409,'Publish a ready production release before exporting this project')
+        resources=db.execute('SELECT kind,state,runtime_driver FROM data_resources WHERE project_id=?'+
+                             (" AND stage='preview'" if preview else ''),(project_id,)).fetchall()
+        native=bool(resources) and all(row['runtime_driver']==NATIVE_DATABASE_DRIVER for row in resources)
+        if preview and resources and not native:
+            raise Problem(422,'Preview data exports require native databases; production data cannot be paused by a preview export')
+        scopes=({PREVIEW_SCOPE,PREVIEW_ENV_SCOPE} if preview else {'deployments:write','env:write'})
+        scopes.update({PREVIEW_DATA_SCOPE} if preview and resources else (DataStore.scope(r['kind']) for r in resources))
         for scope in scopes:store.permit(actor,scope,project_id)
-        if resources and not body.quiesce:
+        if resources and not native and not body.quiesce:
             raise Problem(409,'Set quiesce=true to allow the project apps to pause during the data snapshot (up to six minutes)')
         if any(r['state']!='ready' for r in resources):raise Problem(409,'Finish or remove incomplete data resources before export')
-        release=db.execute("SELECT id FROM deployments WHERE id=? AND project_id=? AND state='ready'",(project['current_deployment'],project_id)).fetchone()
-        if not release:raise Problem(409,'Publish a ready production release before exporting this project')
         if db.execute("SELECT 1 FROM jobs WHERE project_id=? AND state IN ('queued','running')",(project_id,)).fetchone():
             raise Problem(409,'Finish the current project operation before exporting')
         if db.execute('SELECT 1 FROM uploads u JOIN deployments d ON d.id=u.deployment_id WHERE d.project_id=?',(project_id,)).fetchone():
@@ -71,7 +84,7 @@ def create(store,actor,project_id,body):
         if count>=2:raise Problem(429,'Account has two active or downloadable exports; remove one before starting another')
         if not AGE.is_file():raise Problem(503,'Encrypted export is unavailable until the operator installs age')
         operation=ident()
-        db.execute("INSERT INTO jobs(id,project_id,kind,deployment_id,created,updated) VALUES(?,?,?,?,?,?)",(operation,project_id,'project-export',release['id'],now,now))
+        db.execute("INSERT INTO jobs(id,project_id,kind,deployment_id,created,updated,preview_access) VALUES(?,?,?,?,?,?,?)",(operation,project_id,'project-export',release['id'],now,now,preview))
         db.execute('INSERT INTO project_exports(id,recipient,scopes,expires) VALUES(?,?,?,?)',(operation,body.recipient,json.dumps(sorted(scopes)),now+TTL))
         store.audit(db,actor,'project.export',operation)
     return {'id':operation,'job_id':operation,'project_id':project_id,'state':'queued'}
@@ -161,7 +174,8 @@ def execute(worker,job,release):
         worker.guard(db)
         export=dict(db.execute('SELECT * FROM project_exports WHERE id=?',(operation,)).fetchone())
         project=dict(db.execute('SELECT * FROM projects WHERE id=?',(project_id,)).fetchone())
-        resources=[dict(row) for row in db.execute('SELECT id,kind,stage FROM data_resources WHERE project_id=? ORDER BY kind,stage',(project_id,))]
+        resources=[dict(row) for row in db.execute('SELECT id,kind,stage,runtime_driver FROM data_resources WHERE project_id=?'+
+            (" AND stage='preview'" if job['preview_access'] else '')+' ORDER BY kind,stage',(project_id,))]
     pending=None
     try:
         if not final.is_file():
@@ -174,14 +188,17 @@ def execute(worker,job,release):
             if not source.is_file():raise BackendError('Published release source is unavailable')
             config=json.loads(release['config'])
             artifact_driver=release.get('runtime_driver')==ARTIFACT_DRIVER
+            sandbox_driver=release.get('runtime_driver')==SANDBOX_DRIVER
             built=None
-            target=None if artifact_driver else backend.target(release['id']);account=project['account_id']
+            target=None if artifact_driver or sandbox_driver else backend.target(release['id']);account=project['account_id']
             if artifact_driver:
                 image='static-build' if config.get('build_command') else 'static-artifact'
                 if image=='static-build':
                     built=built_archive(store.settings,release['id'])
                     if not built.is_file() or not 0<built.stat().st_size<=BUILT_LIMIT:
                         raise BackendError('Published static build archive is unavailable')
+            elif sandbox_driver:
+                image='paas-release:'+release['id']
             elif target:
                 if target['account_id']!=account:raise BackendError('Release image ownership does not match')
                 image='paas-release:'+release['id']
@@ -190,11 +207,12 @@ def execute(worker,job,release):
                 image=current.get('Image') if current else None
                 if not image or not re.fullmatch(r'sha256:[a-f0-9]{64}',image):raise BackendError('Legacy release image is unavailable')
             manifest={'format':FORMAT,'bundle_id':operation,'name':project['name'],'source_release':release['id'],
-                'image':image,'configuration':config,'project_environment':store.unseal(project['environment']),
-                'release_environment':{k:v for k,v in store.unseal(release['environment']).items() if k not in MANAGED},'resources':resources}
+                'image':image,'configuration':config,'project_environment':{} if job['preview_access'] else store.unseal(project['environment']),
+                'release_environment':{k:v for k,v in store.unseal(release['environment']).items() if k not in MANAGED},
+                'resources':[{key:row[key] for key in ('id','kind','stage')} for row in resources]}
             preview_environment=store.environment(project,'preview')
             if preview_environment:manifest['preview_environment']=preview_environment
-            client=backend.execution_client() if target or resources else None
+            client=backend.execution_client() if target or resources or sandbox_driver else None
             worker.check()
             with tempfile.NamedTemporaryFile(dir=directory(store),prefix=operation+'-',suffix='.part',delete=False) as output:
                 pending=Path(output.name);pending.chmod(0o640)
@@ -207,13 +225,18 @@ def execute(worker,job,release):
                         if not artifact_driver:
                             if config['runtime']=='static':bundle.write(Path(__file__).with_name('static-nginx.conf'),'nginx.conf')
                             with bundle.open('image.tar','w',force_zip64=True) as out:
-                                if target:client.stream_export('GET','/v1/builds/'+release['id']+'/image',out,1024**3,worker.check,headers={'X-Paas-Account':account})
+                                if target or sandbox_driver:client.stream_export('GET','/v1/builds/'+release['id']+'/image',out,1024**3,worker.check,headers={'X-Paas-Account':account})
                                 else:legacy_image(image,out,worker.check)
                         if resources:
-                            client.bootstrap(account)
                             with bundle.open('data.zip','w',force_zip64=True) as out:
-                                client.stream_export('POST','/v1/runtimes/'+account+'/snapshot',out,12*1024**3+16*1024**2,worker.check,
-                                    body={'operation':operation,'project_id':project_id,'resources':resources})
+                                if all(row['runtime_driver']==NATIVE_DATABASE_DRIVER for row in resources):
+                                    if len(resources)!=1:raise BackendError('Native export requires exactly one preview database')
+                                    client.stream_export('POST','/v1/databases/'+resources[0]['id']+'/snapshot',out,2*1024**3+16*1024**2,worker.check,
+                                        body={'operation':operation,'project_id':project_id,'account_id':account})
+                                else:
+                                    client.bootstrap(account)
+                                    client.stream_export('POST','/v1/runtimes/'+account+'/snapshot',out,12*1024**3+16*1024**2,worker.check,
+                                        body={'operation':operation,'project_id':project_id,'resources':manifest['resources']})
                     process.stdin.close()
                     if process.wait(timeout=30):raise BackendError('Project bundle encryption failed')
                     os.fsync(output.fileno())

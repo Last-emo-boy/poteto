@@ -21,7 +21,7 @@ import tarfile
 import tempfile
 import time
 
-from execution import builder_profile, native_build, native_database, prebuilt_image, sandbox
+from execution import builder_profile, native_archive, native_build, native_database, prebuilt_image, sandbox
 
 ROOT = Path(os.environ.get("PAAS_EXEC_ROOT", "/srv/ovh-paas-execution"))
 RESTORES = Path('/srv/ovh-paas-platform/restore')
@@ -892,6 +892,73 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 try:stream.close()
                 except BrokenPipeError:pass
 
+    def native_archive_stream(self, resource, action):
+        size=int(self.headers.get('Content-Length','0'))
+        if action=='dump':
+            if not 0<size<=4096:
+                raise ValueError('Invalid native database snapshot request')
+            body=json.loads(self.rfile.read(size))
+        else:
+            if self.headers.get('Content-Type')!='application/octet-stream' or not 0<size<=native_archive.LIMIT:
+                raise ValueError('Invalid native database restore upload')
+            body=json.loads(base64.urlsafe_b64decode(self.headers.get('X-Paas-Restore-Spec','')))
+        body={key:checked_id(body[key]) for key in ('account_id','project_id','operation')}
+        body['resource_id']=checked_id(resource)
+        unit='paas-native-'+action+'-'+body['operation']+'.service'
+        with active_account(body['account_id']), lock('native-data-'+resource):
+            config=json.loads((ROOT/'config.json').read_text())
+            database, _=native_archive.database(ROOT,config,body)
+            if action=='restore' and database.read().get('import_id')!=body['operation']:
+                raise ValueError('Restore database is not owned by this import')
+            cleanup=shlex.join(['/usr/bin/python3','-m','execution.native_archive','finish-'+action,
+                               body['account_id'],body['project_id'],resource,body['operation']])
+            command=['systemd-run','--quiet','--pipe','--wait','--collect','--unit='+unit,
+                     '--property=WorkingDirectory='+str(CODE),'--property=RuntimeMaxSec='+('900' if action=='restore' else '360'),
+                     '--property=TimeoutStopSec=45','--property=UMask=0077','--property=MemoryMax=192M',
+                     '--property=ExecStopPost='+cleanup,'/usr/bin/python3','-m','execution.native_archive',action]
+            process=subprocess.Popen(command,stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+            try:
+                self.connection.settimeout(120)
+                process.stdin.write(json.dumps(body|({'size':size} if action=='restore' else {})).encode()+b'\n')
+                if action=='restore':
+                    while size:
+                        chunk=self.rfile.read(min(size,1024**2))
+                        if not chunk:raise ValueError('Incomplete native database restore upload')
+                        process.stdin.write(chunk);size-=len(chunk)
+                    process.stdin.close()
+                    if process.wait(timeout=920):
+                        raise ExecutionError('Native database restore failed; retry the same import after inspection')
+                    result=json.loads(process.stdout.read(4096))
+                    if result!={'restored':True}:raise ExecutionError('Native database restore receipt was not confirmed')
+                    return self.response(200,result)
+                process.stdin.close()
+                self.protocol_version='HTTP/1.1';self.close_connection=True
+                self.send_response(200);self.send_header('Content-Type','application/zip')
+                self.send_header('Transfer-Encoding','chunked');self.send_header('Connection','close');self.end_headers()
+                total=0
+                while chunk:=process.stdout.read(1024**2):
+                    total+=len(chunk)
+                    if total>native_archive.LIMIT+16*1024**2:raise ExecutionError('Native snapshot exceeds its size limit')
+                    self.wfile.write(f'{len(chunk):x}\r\n'.encode());self.wfile.write(chunk);self.wfile.write(b'\r\n')
+                if process.wait(timeout=45):
+                    raise ExecutionError('Native database snapshot failed')
+                self.wfile.write(b'0\r\n\r\n')
+            except (OSError,ExecutionError,subprocess.TimeoutExpired) as error:
+                if action!='dump':raise
+                self.log_error('Native snapshot %s interrupted (%s)',body['operation'],type(error).__name__)
+            finally:
+                try:
+                    state=subprocess.run(['systemctl','show',unit,'--property=LoadState','--value'],capture_output=True,text=True,timeout=15)
+                    if state.stdout.strip()!='not-found':
+                        if state.returncode or state.stdout.strip()!='loaded':
+                            raise ExecutionError('Native archive supervisor status is unavailable')
+                        subprocess.run(['systemctl','stop',unit],check=True,capture_output=True,timeout=60)
+                finally:
+                    if process.poll() is None:process.kill();process.wait()
+                    for stream in (process.stdin,process.stdout,process.stderr):
+                        try:stream.close()
+                        except BrokenPipeError:pass
+
     def do_GET(self):
         if not self.authorized():
             return self.response(401, {"error": "Execution supervisor credential required"})
@@ -926,6 +993,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         leases=ExitStack()
         try:
             parts = self.path.strip("/").split("/")
+            if len(parts)==4 and parts[:2]==['v1','databases'] and parts[3] in {'snapshot','restore'}:
+                return self.native_archive_stream(checked_id(parts[2]),'dump' if parts[3]=='snapshot' else 'restore')
             if len(parts)==4 and parts[:2]==['v1','runtimes'] and parts[3] in {'prepare-retirement','commit-retirement'}:
                 return self.response(200,retire_runtime(parts[2],parts[3].split('-')[0]))
             if len(parts)>=3 and parts[:2]==['v1','runtimes']:
@@ -966,7 +1035,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 self.connection.settimeout(15)
                 body = json.loads(self.rfile.read(size))
                 leases.enter_context(active_account(checked_id(body["account_id"])))
-                with lock("sandbox-placements"):
+                with lock('native-data-'+resource_id) if parts[1]=='databases' else nullcontext(), lock("sandbox-placements"):
                     config = json.loads((ROOT / "config.json").read_text())
                     if parts[1] == 'databases':
                         return self.response(200, native_database.operation(ROOT, config, resource_id, body,

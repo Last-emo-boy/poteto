@@ -254,14 +254,14 @@ class Dokploy:
         return self.execution_client().sandbox(deployment['id'], self.account(deployment),
                                                deployment['project_id'], action, **fields)
 
-    def publish_sandbox(self, deployment, archive, log, check, *, before_migrate=None):
+    def publish_sandbox(self, deployment, archive, log, check, *, before_migrate=None, skip_migration=False):
         config = json.loads(deployment['config'])
         personal = deployment.get('preview_mode') == 'isolated'
         if not self.settings.sandbox_enabled(deployment['project_id'], config, personal=personal):
             raise BackendError('This project is no longer enabled for sandbox previews')
         self.build_output(deployment, config, archive, self.account(deployment), log, check,
                           native_only=config['runtime'] != 'image')
-        if config.get('migration_command'):
+        if config.get('migration_command') and not skip_migration:
             from publisher.data_backend import DataBackend
             if before_migrate:
                 before_migrate()
