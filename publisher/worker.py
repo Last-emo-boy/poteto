@@ -301,7 +301,8 @@ class Worker:
         if sandbox:
             self.state(deployment['id'], 'building')
             archive = self.store.settings.root / 'artifacts' / f"{deployment['id']}.tar.gz"
-            self.backend.publish_sandbox(deployment, archive, lambda text: self.log(deployment, text), self.check)
+            self.backend.publish_sandbox(deployment, archive, lambda text: self.log(deployment, text), self.check,
+                                         before_migrate=lambda:self.state(deployment['id'],'migrating'))
             self.state(deployment['id'], 'deploying', backend_id=SANDBOX_DRIVER)
         elif artifact:
             archive = self.store.settings.root / 'artifacts' / f"{deployment['id']}.tar.gz"

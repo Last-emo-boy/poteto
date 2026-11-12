@@ -190,7 +190,7 @@ def create_app(settings=None):
                 'web_egress': {'enabled': settings.sandbox_web,
                                'authorized': bool({'*', 'deployments:write', PREVIEW_WEB_SCOPE} & set(user['scopes'])),
                                'ports': [80, 443], 'private_networks': False},
-                'limitations': ['Outbound network requires explicit web permission', 'No volume binding or migration command', 'Image previews only; no VM fallback'] if personal else []}
+                'limitations': ['Outbound network requires explicit web permission', 'No volume binding', 'Image previews only; no VM fallback'] if personal else []}
 
     @app.patch('/v1/projects/{project_id}',tags=['Projects'])
     def rename_project(project_id: str,body: ProjectInput,user=Depends(actor)):

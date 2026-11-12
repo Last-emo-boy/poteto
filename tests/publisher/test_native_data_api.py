@@ -164,3 +164,33 @@ class NativeDataApiTests(unittest.TestCase):
         self.assertEqual(404, self.client.get('/v1/data/'+resource['id']).status_code)
         self.assertEqual(404, self.client.get('/v1/jobs/'+resource['job_id']).status_code)
         self.assertEqual(404, self.client.delete('/v1/data/'+resource['id']+'?destroy_data=true').status_code)
+
+    def test_preview_migration_finishes_before_application_start_and_failure_never_publishes(self):
+        from publisher.backend import BackendError, Dokploy
+        resource=self.create_database(ready=True)
+        config={'runtime':'image','target':'preview','database_id':resource['id'],'migration_command':'node migrate.js'}
+        response=self.client.post(self.base+'/deployments',json=config)
+        self.assertEqual(201,response.status_code,response.text)
+        with self.store.connection() as db:
+            release=dict(db.execute('SELECT * FROM deployments WHERE id=?',(response.json()['id'],)).fetchone())
+        release['preview_mode']='isolated'
+        release['app_domain']=self.settings.domain
+        backend=Dokploy({'routes':str(self.settings.root),'releases':str(self.settings.root/'releases')},self.settings)
+        backend.store=self.store;client=Mock();events=[]
+        before=lambda:events.append('migrating')
+        def request(*args,**kwargs):
+            events.append(args[3])
+            return {'state':'succeeded','log':'done'} if args[3]=='migrate' else {'http_port':23000}
+        client.sandbox.side_effect=request
+        with patch.object(backend,'execution_client',return_value=client),patch.object(backend,'build_output'), \
+             patch.object(backend,'forward_route') as route,patch('publisher.runtime.RuntimeRegistry') as vm:
+            backend.publish_sandbox(release,self.settings.root/'image',Mock(),Mock(),before_migrate=before)
+            self.assertEqual(['migrating','migrate','start'],events)
+            route.assert_called_once();vm.assert_not_called()
+            client.sandbox.reset_mock();client.sandbox.side_effect=None
+            client.sandbox.return_value={'state':'failed','log':'migration failed'}
+            route.reset_mock()
+            with self.assertRaisesRegex(BackendError,'migration failed'):
+                backend.publish_sandbox(release,self.settings.root/'image',Mock(),Mock(),before_migrate=before)
+            route.assert_not_called()
+            self.assertEqual(['migrate'],[call.args[3] for call in client.sandbox.call_args_list])

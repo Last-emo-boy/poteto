@@ -4,7 +4,7 @@ import time
 from publisher.backend import BackendError
 from publisher.runtime import RuntimeRegistry
 from publisher.executor import ExecutionFailure
-from publisher.store import NATIVE_DATABASE_DRIVER
+from publisher.store import NATIVE_DATABASE_DRIVER, SANDBOX_DRIVER
 
 
 class DataBackend:
@@ -121,13 +121,19 @@ class DataBackend:
     def migrate(self,deployment,account,check,log=None):
         config=json.loads(deployment['config'])
         environment=self.store.unseal(deployment['environment'])
+        native=deployment.get('runtime_driver')==SANDBOX_DRIVER
         deadline=time.monotonic()+300
         while time.monotonic()<deadline:
             if check:
                 check()
-            result=self.client.data(account,config['database_id'],deployment['project_id'],'migrate',
-                release_id=deployment['id'],command=config['migration_command'],environment=environment,
-                memory_mb=config['memory_mb'],cpus=config['cpus'],volume_id=config.get('volume_id'))
+            if native:
+                result=self.client.sandbox(deployment['id'],account,deployment['project_id'],'migrate',
+                    database_id=config['database_id'],command=config['migration_command'],environment=environment,
+                    memory_mb=config['memory_mb'],cpus=config['cpus'])
+            else:
+                result=self.client.data(account,config['database_id'],deployment['project_id'],'migrate',
+                    release_id=deployment['id'],command=config['migration_command'],environment=environment,
+                    memory_mb=config['memory_mb'],cpus=config['cpus'],volume_id=config.get('volume_id'))
             if log and result.get('log'):
                 for line in result['log'].splitlines():
                     log('migration: '+line)
@@ -136,5 +142,8 @@ class DataBackend:
             if result['state']=='failed':
                 raise BackendError('Database migration failed; production traffic was not switched and data was retained')
             time.sleep(2)
-        self.client.data(account,config['database_id'],deployment['project_id'],'stop-migration',release_id=deployment['id'])
+        if native:
+            self.client.sandbox(deployment['id'],account,deployment['project_id'],'stop-migration')
+        else:
+            self.client.data(account,config['database_id'],deployment['project_id'],'stop-migration',release_id=deployment['id'])
         raise BackendError('Database migration exceeded 300 seconds; inspect the existing migration before retrying')

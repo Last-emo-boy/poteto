@@ -219,7 +219,7 @@ GRANT USAGE,CREATE ON SCHEMA public TO app;
                 raise ValueError('Database storage has no runtime receipt; reconcile before deletion')
             sandbox_network.configure(self.root,self.config)
             return {'deleted':True}
-        for path in (self.root/'sandboxes').glob('*.json'):
+        for path in [*(self.root/'sandboxes').glob('*.json'), *(self.root/'sandbox-migrations').glob('*.json')]:
             if json.loads(path.read_text()).get('database_id')==self.resource:
                 raise ValueError('A retained application still uses this database')
         container=self.container(record)

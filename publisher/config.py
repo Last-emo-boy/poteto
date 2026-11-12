@@ -83,8 +83,9 @@ class Settings:
                 and config['runtime'] in {'node', 'dockerfile', 'image'} and config['memory_mb'] >= 256
                 and (not selected or config['runtime'] == 'image')
                 and (not config.get('sleep') or selected or project in self.sandbox_sleep_projects)
-                and not any(config.get(k) for k in ('volume_id', 'migration_command'))
-                and (not config.get('database_id') or (selected and self.native_databases)))
+                and not config.get('volume_id')
+                and (not config.get('database_id') or (selected and self.native_databases))
+                and (not config.get('migration_command') or (selected and self.native_databases and bool(config.get('database_id')))))
 
     @classmethod
     def from_env(cls):

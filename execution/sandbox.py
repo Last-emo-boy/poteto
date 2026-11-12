@@ -217,12 +217,16 @@ def check_pool(root, config, release, memory, cpu):
     effective_memory, (actual, period), swap = pool_state()
     if effective_memory != limit * 1024**2 or actual != round(cpus * period) or swap != 0:
         raise ValueError('Sandbox pool configuration does not match its effective cgroup limits')
-    reservations = list((root / 'sandboxes').glob('*.json')) + list((root / 'native-databases').glob('*/database.json'))
+    reservations = (list((root / 'sandboxes').glob('*.json'))
+                    + list((root / 'native-databases').glob('*/database.json'))
+                    + list((root / 'sandbox-migrations').glob('*.json')))
     for record in reservations:
-        identity = record.stem if record.parent.name == 'sandboxes' else record.parent.name
+        identity = record.parent.name if record.name == 'database.json' else record.stem
         if identity == release:
             continue
         value = json.loads(record.read_text())
+        if record.parent.name == 'sandbox-migrations' and value['phase'] in {'succeeded','failed'}:
+            continue
         if 'memory_mb' not in value or 'cpus' not in value:
             container = inspect('container', 'poteto-sbx-' + record.stem)
             if container is None:
@@ -240,6 +244,9 @@ def operation(root, config, release, body, build_status):
     account, project, action = (body.get(k) for k in ("account_id", "project_id", "action"))
     if not all(isinstance(v, str) and ID.fullmatch(v) for v in (release, account, project)):
         raise ValueError("Invalid sandbox ownership")
+    if action in {'migrate','stop-migration'}:
+        from execution import sandbox_migration
+        return sandbox_migration.operation(root,config,release,body,build_status)
     if action not in {"start", "inspect", "logs", "delete"}:
         raise ValueError("Invalid sandbox operation")
     records = root / "sandboxes"
@@ -251,6 +258,8 @@ def operation(root, config, release, body, build_status):
     expected = labels(release, account, project)
     name = "poteto-sbx-" + release
     if action == "start":
+        from execution.sandbox_migration import completed_image
+        migration_image = completed_image(root,release,account,project)
         personal = body.get('personal_preview', False)
         if type(personal) is not bool or (personal and config.get('personal_previews') is not True):
             raise ValueError('Personal preview execution is not enabled')
@@ -329,7 +338,11 @@ def operation(root, config, release, body, build_status):
             if not receipt.get("image_ids"):
                 previous = receipt.get("image_id")
                 if not previous and has_tag(image):
-                    raise ValueError("Sandbox image tag is already in use")
+                    previous_ids = migration_image
+                    if previous_ids is None:
+                        raise ValueError("Sandbox image tag is already in use")
+                    if previous_ids != image_identities(archive_path,image):
+                        raise ValueError('Migration image does not match this preview archive')
                 receipt["image_ids"] = image_identities(archive_path, image)
                 if previous and previous not in receipt["image_ids"]:
                     raise ValueError("The existing image receipt does not match the native export")
@@ -361,6 +374,13 @@ def operation(root, config, release, body, build_status):
             save(path, receipt)
             sandbox_wake.configure(root, config, docker)
         return {"http_port": sandbox_wake.PROXY_PORT if wake else receipt["host_port"]}
+    if action == 'delete':
+        from execution.sandbox_migration import remove
+        migration_image = remove(root,release,account,project)
+        if receipt is None and migration_image and has_tag('paas-release:'+release):
+            if docker('image','inspect','--format','{{.Id}}','paas-release:'+release) not in migration_image:
+                raise ValueError('Refusing to delete an image without its migration receipt')
+            docker('image','rm','paas-release:'+release)
     if receipt is None:
         return {"container": None, "log": "", "deleted": True}
     container = inspect("container", name)
