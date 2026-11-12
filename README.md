@@ -76,6 +76,19 @@ Changes apply to the runtime of new deployments. `redeploy` rebuilds the origina
 
 The CLI prints a request ID to stderr. If a request is interrupted, repeat with `--request-id THE_SAME_ID` to resume the same candidate rather than creating another. `--no-wait` returns the queued candidate; `inspect` and `logs` can observe it later. `retry` remains the command for resuming a failed candidate in place.
 
+## Build and publish without compiling on the server
+
+```sh
+poteto plan . --preview --json
+poteto deploy . --local-build --preview --url-only
+```
+
+`--local-build` builds on the client, checks the actual artifact against server permissions and quotas, then uploads only that artifact. Static projects use local npm; Node projects and Dockerfile projects use your Docker context to build a `linux/amd64` image. Dynamic projects need Docker Engine API 1.48+, Buildx and the server's existing `prebuilt_image_projects` opt-in. A failed local build or preflight creates no deployment and never falls back to server compilation. Ordinary `deploy` retains its existing source-build behavior.
+
+Build trusted projects only. The image context follows Poteto's upload exclusions, including `.env*`, credentials, `.git`, `.poteto` and `node_modules`. Build output goes to stderr; `--url-only` keeps stdout suitable for automation. Temporary image tags are removed after packaging; Docker's build cache remains for the next build. Use a local Docker context or an independent CI runner to keep compilation off the publishing server.
+
+For separate CI build and publish jobs:
+
 ## Build static sites locally or in CI
 
 ```sh
@@ -88,7 +101,15 @@ poteto deploy . --prebuilt --preview --url-only
 
 ## Publish a prebuilt dynamic image
 
-For a project enabled in `prebuilt_image_projects` in the publisher runtime configuration, build your Linux image locally or in CI, then publish it without a server-side build:
+For a Node or Dockerfile project enabled in `prebuilt_image_projects`, build locally or in CI and publish the resulting image without server-side compilation:
+
+```sh
+poteto build .
+poteto plan . --prebuilt-image .poteto/image.tar.gz --remote --preview --json
+poteto deploy . --prebuilt-image .poteto/image.tar.gz --preview --url-only
+```
+
+Node builds share the hosted builder's locked npm install and runtime recipe. Use a multi-stage Dockerfile for lean framework-specific images such as Next.js standalone output. With an existing locally built image, packaging still works without rebuilding:
 
 ```sh
 docker buildx build --platform linux/amd64 --load -t my-app:preview .
