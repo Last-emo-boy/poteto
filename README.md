@@ -73,6 +73,28 @@ poteto deploy . --resume DEPLOYMENT_ID
 
 The CLI saves the original artifact and its API/project/target in `.poteto/` with restricted file permissions, without credentials. `--resume` sends those same bytes; it does not rebuild or read modified application files. Omit build/configuration/target flags when resuming, and keep the original credential or another credential authorized for that project. Add `--project PROJECT_ID` for a manual token. The local pending copy is removed after the server confirms queueing. Unsubmitted server uploads expire after 24 hours and count toward storage quotas. The original whole-archive endpoint remains available for older clients; a new client uses it only when the server does not advertise resumable uploads.
 
+## See reservations and clean up previews
+
+```sh
+poteto usage
+poteto usage --json
+poteto prune --older-than-days 7 --keep 3
+```
+
+`usage` shows the account's artifact-storage, runtime and concurrent-deployment budgets, plus accessible projects and the selected project's visible release reservations. These are the same reservations used by admission checks, not measured CPU or RSS; sleeping apps still reserve capacity. Database/volume disk space is separate from artifact storage. Project-scoped credentials never list another project's releases, and preview credentials do not list production releases.
+
+`prune` is read-only by default. It protects production, every release referenced by a promotion/rollback operation, data-bound previews, active deployments, and the newest three ready previews. Only previews older than seven days are selected by default. It reports the reservations that deletion would release, not a promise about physical disk savings.
+
+After reviewing the exact candidate IDs, use the printed command, for example:
+
+```sh
+poteto prune --older-than-days 7 --keep 3 --yes --ids PREVIEW_ID_1 PREVIEW_ID_2
+```
+
+Both `--yes` and `--ids` are required. The server rechecks every selected ID before queueing any deletion. It never adds new candidates to your selection. Cleanup uses the existing durable deletion jobs; repeat the same IDs after an interrupted request to observe pending jobs, retry failed cleanup, or confirm an already-removed release. Use `--no-wait --json` to retain the job IDs without waiting.
+
+Ordinary Agent preview tokens remain deployment-only. Personal users can explicitly request preview cleanup during IF.Link login with `poteto login --manage-previews` (log out first, or choose a separate `--output` file). This grants `previews:manage` only for the bound project, not production, environment variables, token issuance or database/volume deletion. Existing management credentials with `deployments:write` also work. For manual tokens, add `--project PROJECT_ID` to these commands.
+
 ## Runtime variables and redeploys
 
 ```sh

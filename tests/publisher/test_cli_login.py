@@ -24,7 +24,7 @@ from publisher import cli
 from publisher.api import create_app
 from publisher.config import Settings
 from publisher.login_contract import DEFAULT_URL, ISSUER, LOGIN_PATH, REDIRECT_URI
-from publisher.store import PREVIEW_SCOPE, Store
+from publisher.store import PREVIEW_MANAGE_SCOPE, PREVIEW_SCOPE, Store
 
 
 class CliLoginTests(unittest.TestCase):
@@ -237,7 +237,7 @@ class CliLoginTests(unittest.TestCase):
     def test_disabled_and_maintenance_preserve_the_existing_auth_boundary(self):
         with patch.dict(os.environ, {"PAAS_OIDC_CONFIG_FILE": ""}):
             self.assertEqual(401, TestClient(create_app(self.settings)).get(LOGIN_PATH).status_code)
-        self.assertEqual({"issuer": ISSUER, "client_id": "poteto-cli"}, self.api.get(LOGIN_PATH).json())
+        self.assertEqual({"issuer": ISSUER, "client_id": "poteto-cli", "preview_management": True}, self.api.get(LOGIN_PATH).json())
         self.assertEqual(401, self.api.post("/v1/projects", json={"name": "bad"}).status_code)
         self.assertEqual(401, self.api.delete(LOGIN_PATH).status_code)
         self.assertEqual(413, self.api.post(LOGIN_PATH, content=b"x" * 65537).status_code)
@@ -253,3 +253,11 @@ class CliLoginTests(unittest.TestCase):
         self.assertEqual(201, response.status_code, response.text)
         self.assertEqual("no-store", response.headers["Cache-Control"])
         self.assertEqual(["deployments:preview"], response.json()["scopes"])
+
+    def test_management_permission_requires_an_explicit_login_option(self):
+        with patch("publisher.oidc_login.urlopen", side_effect=lambda *a, **k: self.token_response(self.body["nonce"])), patch.object(jwt.PyJWKClient, "fetch_data", return_value=self.jwks):
+            response = self.api.post(LOGIN_PATH, json=self.body | {"manage_previews": True})
+        self.assertEqual(201, response.status_code, response.text)
+        self.assertEqual([PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE], response.json()["scopes"])
+        self.assertEqual([self.project], response.json()["project_ids"])
+        self.assertEqual(422, self.api.post(LOGIN_PATH, json=self.body | {"manage_previews": "yes"}).status_code)

@@ -24,9 +24,10 @@ def encode(value):
 
 
 PREVIEW_SCOPE = "deployments:preview"
+PREVIEW_MANAGE_SCOPE = "previews:manage"
 ARTIFACT_DRIVER = "static-artifact"
 SANDBOX_DRIVER = "gvisor"
-SCOPES = {"projects:read", "projects:write", "deployments:read", "deployments:write", "env:write", "databases:write", "storage:write", "tokens:write", "exports:write", "imports:write", PREVIEW_SCOPE}
+SCOPES = {"projects:read", "projects:write", "deployments:read", "deployments:write", "env:write", "databases:write", "storage:write", "tokens:write", "exports:write", "imports:write", PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
  id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
@@ -342,8 +343,9 @@ class Store:
         return {'project_id':project_id,'job_id':job_id,'state':'deleting'}
 
     def check_concurrency(self, db, actor):
+        from publisher.capacity import active_count
         account = db.execute("SELECT * FROM accounts WHERE id=?", (actor["account_id"],)).fetchone()
-        count = db.execute("SELECT count(*) FROM deployments d JOIN projects p ON d.project_id=p.id WHERE p.account_id=? AND d.state IN ('uploading','queued','building','migrating','deploying','activating','cancelling')", (actor["account_id"],)).fetchone()[0]
+        count = active_count(db, actor["account_id"])
         if count >= account["max_concurrent"]:
             raise Problem(429, "Concurrent deployment quota reached")
         return account
@@ -359,39 +361,23 @@ class Store:
         db.execute('DELETE FROM deployments WHERE id=?', (deployment_id,))
 
     def check_runtime_capacity(self, db, account_id, config, excluding="", *, driver=None):
+        from publisher import capacity
         if driver == ARTIFACT_DRIVER:
             return
         # A failed release can still own a running container. Its reservation is
         # released only after resource deletion, not when a health check fails.
-        rows = db.execute("SELECT p.account_id,d.config,d.runtime_driver FROM deployments d JOIN projects p ON d.project_id=p.id WHERE d.id!=? AND d.runtime_driver IS NOT ? AND (d.state NOT IN ('failed','cancelled') OR d.backend_id IS NOT NULL)", (excluding, ARTIFACT_DRIVER)).fetchall()
-        total_memory = total_cpu = account_memory = account_cpu = 0
-        sandbox_memory = sandbox_cpu = 0
-        for row in rows:
-            current = json.loads(row["config"])
-            total_memory += current["memory_mb"]
-            total_cpu += current["cpus"]
-            if row['runtime_driver'] == SANDBOX_DRIVER:
-                sandbox_memory += current['memory_mb']
-                sandbox_cpu += current['cpus']
-            if row["account_id"] == account_id:
-                account_memory += current["memory_mb"]
-                account_cpu += current["cpus"]
+        totals = capacity.reservations(db, excluding)
+        total, sandbox = totals["platform"], totals["sandbox"]
+        account = totals["accounts"].get(account_id, capacity.empty())
         # Match the sandbox slice envelope, rather than over-reserving its parent limits.
-        if driver == SANDBOX_DRIVER and (sandbox_memory + config['memory_mb'] > 2048
-                                         or sandbox_cpu + config['cpus'] > 1.5):
+        if driver == SANDBOX_DRIVER and (sandbox["memory_mib"] + config['memory_mb'] > capacity.SANDBOX["memory_mib"]
+                                         or sandbox["vcpus"] + config['cpus'] > capacity.SANDBOX["vcpus"]):
             raise Problem(429, "Sandbox preview pool capacity is reserved; remove an unused sandbox preview")
-        resources = db.execute("SELECT p.account_id FROM data_resources r JOIN projects p ON r.project_id=p.id WHERE r.kind='database'").fetchall()
-        for row in resources:
-            total_memory += 256
-            total_cpu += 0.25
-            if row['account_id'] == account_id:
-                account_memory += 256
-                account_cpu += 0.25
-        if account_memory + config["memory_mb"] > 4096:
+        if account["memory_mib"] + config["memory_mb"] > capacity.ACCOUNT["memory_mib"]:
             raise Problem(429, "Account runtime memory reservation exceeds 4096 MiB; delete unused releases")
-        if account_cpu + config["cpus"] > 4:
+        if account["vcpus"] + config["cpus"] > capacity.ACCOUNT["vcpus"]:
             raise Problem(429, "Account runtime CPU reservation exceeds 4 vCPU; delete unused releases")
-        if total_memory + config["memory_mb"] > 20480 or total_cpu + config["cpus"] > 6:
+        if total["memory_mib"] + config["memory_mb"] > capacity.PLATFORM["memory_mib"] or total["vcpus"] + config["cpus"] > capacity.PLATFORM["vcpus"]:
             raise Problem(429, "Platform runtime capacity is reserved; retry after releases are removed")
 
     def deployment_preconditions(self, db, actor, project, config):

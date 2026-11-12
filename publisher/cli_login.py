@@ -83,7 +83,7 @@ def authorize(client_id, *, timeout=180):
     return {"code": callback["code"], "verifier": verifier, "nonce": nonce}
 
 
-def login(client, output):
+def login(client, output, *, manage_previews=False):
     endpoint = urlsplit(client.url)
     if endpoint.scheme != "https" or not endpoint.hostname or endpoint.username is not None or endpoint.path or endpoint.query or endpoint.fragment:
         raise ValueError("IF.Link login requires the HTTPS origin of a Poteto API")
@@ -94,10 +94,15 @@ def login(client, output):
     config = client.request("GET", LOGIN_PATH)
     if config.get("issuer") != ISSUER or not config.get("client_id"):
         raise RuntimeError("This endpoint does not offer Poteto login with IF.Link")
+    if manage_previews and not config.get("preview_management"):
+        raise RuntimeError("This server does not support preview-management login yet")
     # Reserve the destination before authenticating or issuing a token.
     with open(output, "x", encoding="utf-8", opener=lambda path, flags: os.open(path, flags, 0o600)) as out:
         try:
-            result = client.request("POST", LOGIN_PATH, authorize(config["client_id"]))
+            request = authorize(config["client_id"])
+            if manage_previews:
+                request["manage_previews"] = True
+            result = client.request("POST", LOGIN_PATH, request)
             token = result.pop("token")
             json.dump({"token": token, "poteto_url": client.url, "project_id": result["project_id"]}, out)
             out.write("\n")

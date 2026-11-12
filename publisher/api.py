@@ -14,7 +14,7 @@ from publisher.archive import ArchiveError, unpack
 from publisher.config import Settings
 from publisher.http_limits import ControlLimits
 from publisher.models import PreflightInput, DeploymentInput, EnvironmentInput, EnvironmentPatchInput, ProjectInput, ReleaseInput, TokenInput
-from publisher.store import PREVIEW_SCOPE, SANDBOX_DRIVER, Problem, SCOPES, Store, encode, ident
+from publisher.store import PREVIEW_MANAGE_SCOPE, PREVIEW_SCOPE, SANDBOX_DRIVER, Problem, SCOPES, Store, encode, ident
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -67,6 +67,8 @@ def create_app(settings=None):
     register_imports(app,store,actor)
     from publisher.source_uploads import register as register_uploads
     register_uploads(app, store, actor)
+    from publisher.preview_management import register as register_previews
+    register_previews(app, store, actor)
 
     def release_view(row):
         config = json.loads(row["config"])
@@ -117,7 +119,8 @@ def create_app(settings=None):
         scopes = set(body.scopes)
         if not scopes or not scopes <= SCOPES | {"*"}:
             raise Problem(422, "Unknown or empty token scopes")
-        if PREVIEW_SCOPE in scopes and (scopes != {PREVIEW_SCOPE} or not body.project_ids):
+        if scopes & {PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE} and (
+                scopes not in ({PREVIEW_SCOPE}, {PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE}) or not body.project_ids):
             raise Problem(422, "A preview token requires explicit project IDs and no other scopes")
         if "*" not in user["scopes"] and not scopes <= set(user["scopes"]):
             raise Problem(403, "A token cannot grant more permissions than its issuer")
@@ -409,6 +412,11 @@ def create_app(settings=None):
             if not job:
                 raise Problem(404, "Job not found")
             scope = 'deployments:read'
+            if job['kind'] == 'delete' and PREVIEW_SCOPE in user['scopes']:
+                if not db.execute("SELECT 1 FROM audit WHERE account_id=? AND action='preview.prune' AND object_id=?",
+                                  (user['account_id'], job_id)).fetchone():
+                    raise Problem(404, 'Preview cleanup job not found')
+                scope = PREVIEW_MANAGE_SCOPE
             if job['kind']=='project-delete':scope='projects:write'
             if job['kind']=='project-export':scope='exports:write'
             if job['kind']=='project-import':scope='imports:write'

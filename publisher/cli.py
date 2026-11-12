@@ -25,6 +25,7 @@ if __package__:
     from .login_contract import DEFAULT_URL, LOGIN_PATH
     from .transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
     from . import cli_upload
+    from . import cli_usage
 else:
     from cli_login import default_token_file, login, logout
     from cli_tools import VERSION, PlanError, deployment_config, initialize, pack, plan_deployment
@@ -33,6 +34,7 @@ else:
     from login_contract import DEFAULT_URL, LOGIN_PATH
     from transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
     import cli_upload
+    import cli_usage
 
 
 class Client:
@@ -289,6 +291,7 @@ def main(prog="poteto"):
     commands = parser.add_subparsers(dest="command", required=True)
     sign_in = commands.add_parser("login", help="Sign in with IF.Link in your browser")
     sign_in.add_argument("--output", type=Path, default=default_token_file())
+    sign_in.add_argument("--manage-previews", action="store_true", help="Explicitly authorize cleanup of your unpublished previews, never production or persistent data")
     sign_out = commands.add_parser("logout", help="Revoke the credential issued by IF.Link login")
     sign_out.add_argument("--file", type=Path, default=default_token_file())
     init = commands.add_parser("init", help="Start a static, Node or Dockerfile preview project")
@@ -320,6 +323,18 @@ def main(prog="poteto"):
         plan.add_argument("--json", action="store_true", help="Output a machine-readable result, including validation errors")
     commands.add_parser("doctor", help="Check API reachability and the current credential without printing it")
     commands.add_parser("whoami")
+    usage = commands.add_parser("usage", help="Show project and account reservations without waking applications")
+    usage.add_argument("--project")
+    usage.add_argument("--json", action="store_true")
+    prune = commands.add_parser("prune", help="Plan cleanup of old unpublished previews; deletes nothing by default")
+    prune.add_argument("--project")
+    prune.add_argument("--older-than-days", type=int, default=7)
+    prune.add_argument("--keep", type=int, default=3, help="Keep at least this many latest ready previews (default: 3)")
+    prune.add_argument("--yes", action="store_true", help="Apply cleanup to the explicit --ids list")
+    prune.add_argument("--ids", nargs="+")
+    prune.add_argument("--json", action="store_true")
+    prune.add_argument("--no-wait", action="store_true")
+    prune.add_argument("--timeout", type=int, default=900)
     tokens = commands.add_parser("token")
     token_actions = tokens.add_subparsers(dest="token_action", required=True)
     preview_token = token_actions.add_parser("create-preview", help="Issue a project-scoped publishing credential")
@@ -415,6 +430,16 @@ def main(prog="poteto"):
         delete.add_argument('--destroy-data',action='store_true',required=True,help='Explicitly destroy the stored data, after all bound releases are removed')
     args = parser.parse_args()
     args.command = {"ls": "deployments", "inspect": "status"}.get(args.command, args.command)
+    if args.command == 'prune':
+        if not 0 <= args.keep <= 100 or not 0 <= args.older_than_days <= 3650:
+            parser.error("Use --keep 0..100 and --older-than-days 0..3650")
+        if args.yes != bool(args.ids):
+            parser.error("Cleanup requires both --yes and an explicit --ids list; omit both for a dry run")
+        if args.no_wait and not args.yes:
+            parser.error("--no-wait is only used with --yes")
+        if args.ids and (len(args.ids) > 100 or len(set(args.ids)) != len(args.ids)
+                         or any(not re.fullmatch(r'[a-f0-9]{24}', value) for value in args.ids)):
+            parser.error("Use distinct 24-character deployment IDs, at most 100")
     if getattr(args, "resume", None) and any((args.local_build, args.prebuilt, args.prebuilt_image,
                                                args.preset, args.config, args.prod, args.preview)):
         parser.error("--resume reuses the saved artifact and target; omit build, configuration and target flags")
@@ -461,7 +486,7 @@ def main(prog="poteto"):
         explicit_url = args.url or os.environ.get("POTETO_URL") or os.environ.get("PAAS_URL")
         args.url = explicit_url or (linked.url if linked else DEFAULT_URL)
         if args.command == "login":
-            print(json.dumps(login(Client(args.url), args.output), indent=2, ensure_ascii=False))
+            print(json.dumps(login(Client(args.url), args.output, manage_previews=args.manage_previews), indent=2, ensure_ascii=False))
             return
         if args.command == "logout":
             print(json.dumps(logout(Client, args.url, args.file), indent=2))
@@ -520,6 +545,14 @@ def main(prog="poteto"):
             return
         if args.command == "whoami":
             result = client.request("GET", "/v1/me")
+        elif args.command == 'usage':
+            result = client.request('GET', f'/v1/projects/{args.project}/usage')
+            if not args.json:
+                cli_usage.show_usage(result)
+                return
+        elif args.command == 'prune':
+            cli_usage.prune(client, args)
+            return
         elif args.command == "link":
             if not args.project:
                 parser.error("link requires --project PROJECT_ID when using a manual token")
