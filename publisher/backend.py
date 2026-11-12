@@ -1,7 +1,10 @@
 """Trusted Dokploy adapter. User archives never supply Compose or Docker options."""
 import http.client
+import ipaddress
 import json
 import shutil
+import socket
+import ssl
 import subprocess
 import time
 import urllib.parse
@@ -14,6 +17,23 @@ from publisher.store import ARTIFACT_DRIVER, SANDBOX_DRIVER, Problem
 
 class BackendError(RuntimeError):
     pass
+
+
+class OriginHTTPSConnection(http.client.HTTPSConnection):
+    """Connect to a fixed origin while verifying the application hostname."""
+
+    def __init__(self, host, address, context, *, port=443, timeout=8):
+        super().__init__(host, port=port, timeout=timeout, context=context)
+        self.address = address
+        self.origin_context = context
+
+    def connect(self):
+        raw = socket.create_connection((self.address, self.port), self.timeout, self.source_address)
+        try:
+            self.sock = self.origin_context.wrap_socket(raw, server_hostname=self.host)
+        except BaseException:
+            raw.close()
+            raise
 
 
 class Dokploy:
@@ -336,12 +356,26 @@ class Dokploy:
         host = self.hostname(deployment,production)
         # Readiness was checked against the app internally. Prove ingress binding separately:
         # the shared edge handles /healthz itself, so an application health path is not a routing probe.
+        ingress = self.config.get("ingress_probe", "public")
+        if ingress not in {"public", "origin"}:
+            raise BackendError("ingress_probe must be public or origin")
+        context = None
+        if ingress == "origin":
+            try:
+                address = str(ipaddress.ip_address(self.config["origin_probe_address"]))
+                ca = Path(self.config["origin_probe_ca"])
+                if not ca.is_absolute():
+                    raise ValueError("The origin CA path must be absolute")
+                context = ssl.create_default_context(cafile=str(ca))
+            except (KeyError, TypeError, ValueError, OSError):
+                raise BackendError("Origin ingress requires an IP address and readable absolute CA file") from None
         path = "/__paas_route_probe__"
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:
             if check:
                 check()
-            connection = http.client.HTTPSConnection(host, timeout=8)
+            connection = (OriginHTTPSConnection(host, address, context) if ingress == "origin"
+                          else http.client.HTTPSConnection(host, timeout=8))
             try:
                 connection.request("GET", path, headers={"User-Agent": "OVH-PaaS-Publisher/0.1"})
                 response = connection.getresponse()
@@ -352,6 +386,8 @@ class Dokploy:
             finally:
                 connection.close()
             time.sleep(3)
+        if ingress == "origin":
+            raise BackendError("Origin HTTPS endpoint is not ready; inspect origin route synchronization and TLS")
         raise BackendError("Public HTTPS endpoint is not ready; inspect domain and edge connector")
 
     def refresh_wake(self):
