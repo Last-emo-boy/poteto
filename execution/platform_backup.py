@@ -147,8 +147,12 @@ def resume(operation,allow_active=False):
 
 def snapshot(operation):
     path=directory(operation);request=json.loads((path/'request.json').read_text())
-    with (ROOT/'backup.lock').open('a') as lock:
+    with (ROOT/'backup.lock').open('a') as lock, (EXECUTION/'builder.lock').open('a') as builder:
         fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        try:
+            fcntl.flock(builder, fcntl.LOCK_EX|fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise ValueError('A build or builder preparation still owns the disposable guest') from None
         if build_units_active():
             raise ValueError('An actual build unit is still active; wait for its supervisor')
         stage=path/'payload'

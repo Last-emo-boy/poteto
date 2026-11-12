@@ -3,6 +3,7 @@ import base64
 from contextlib import ExitStack, contextmanager, nullcontext
 import fcntl
 import http.server
+import io
 import json
 import os
 from pathlib import Path
@@ -16,9 +17,11 @@ import socket
 import stat
 import subprocess
 import sys
+import tarfile
+import tempfile
 import time
 
-from execution import native_build, sandbox
+from execution import builder_profile, native_build, sandbox
 
 ROOT = Path(os.environ.get("PAAS_EXEC_ROOT", "/srv/ovh-paas-execution"))
 RESTORES = Path('/srv/ovh-paas-platform/restore')
@@ -83,7 +86,7 @@ def ssh(port, alias, command, *, data=None, timeout=120, output=None):
     return subprocess.run(args, input=data, stdout=output or subprocess.PIPE, stderr=subprocess.PIPE, timeout=timeout, check=True)
 
 
-def cloud_seed(directory, role, deploy_key=None, bootstrap=False):
+def cloud_seed(directory, role, deploy_key=None, bootstrap=False, *, prepared_builder=False):
     keys = [(ROOT / "admin.key.pub").read_text().strip()]
     if deploy_key:
         if not re.fullmatch(r"ssh-ed25519 [A-Za-z0-9+/=]+(?: [a-zA-Z0-9_.-]+)?", deploy_key):
@@ -93,6 +96,8 @@ def cloud_seed(directory, role, deploy_key=None, bootstrap=False):
     files = []
     if not bootstrap:
         commands = [["bash", "-c", "systemctl stop docker.service docker.socket && rm -f /etc/docker/key.json /var/lib/docker/engine-id && systemctl start docker && echo PAAS_EXECUTION_READY > /dev/ttyS0"]]
+    if prepared_builder:
+        commands = [["bash", "-c", "systemctl start docker && echo PAAS_EXECUTION_READY > /dev/ttyS0"]]
     if bootstrap:
         files = [{"path": "/usr/local/bin/paas-install-docker", "permissions": "0700", "content": (CODE / "execution/docker-bootstrap.sh").read_text()}]
         commands = [["bash", "-c", "/usr/local/bin/paas-install-docker && echo PAAS_EXECUTION_READY > /dev/ttyS0"]]
@@ -154,9 +159,11 @@ def admit_space(role=None, incoming=0):
         raise ExecutionError('Host disk capacity is reserved for existing services and committed VM disks')
 
 
-def reset_disk(role, bootstrap=False, deploy_key=None):
+def reset_disk(role, bootstrap=False, deploy_key=None, *, profile=None):
     if role != "builder" and not re.fullmatch(r"runtime[0-3]", role):
         raise ValueError("Unknown VM role")
+    if profile is not None and (role != "builder" or bootstrap):
+        raise ValueError("Only disposable build guests can use a prepared base")
     admit_space(role)
     directory = ROOT / "vm" / role
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -167,10 +174,11 @@ def reset_disk(role, bootstrap=False, deploy_key=None):
         if unit_state("paas-builder.service") not in {"inactive", "failed"}:
             raise ExecutionError("Refusing to replace an active build disk")
         image.unlink()
-    base = ROOT / ("base.img" if bootstrap else "template.qcow2")
+    base = (builder_profile.base_path(ROOT, profile["generation"]) if profile else
+            ROOT / ("base.img" if bootstrap else "template.qcow2"))
     subprocess.run(["qemu-img", "create", "-f", "qcow2", "-F", "qcow2", "-b", str(base), str(image), "16G" if role == "builder" and not bootstrap else "12G"], check=True, capture_output=True)
     (directory / "monitor.sock").unlink(missing_ok=True)
-    cloud_seed(directory, role, deploy_key, bootstrap)
+    cloud_seed(directory, role, deploy_key, bootstrap, prepared_builder=bool(profile))
     (directory / "serial.log").write_text("")
     username = "paasbuild" if role == "builder" else "paasrt" + role[-1]
     user = pwd.getpwnam(username)
@@ -181,7 +189,7 @@ def reset_disk(role, bootstrap=False, deploy_key=None):
     return directory
 
 
-def wait_ready(role, port, alias, timeout=600):
+def wait_ready(role, port, alias, timeout=600, *, require_marker=False):
     directory = ROOT / "vm" / role
     unit = "paas-builder.service" if role == "builder" else f"paas-runtime@{role[-1]}.service"
     deadline = time.monotonic() + timeout
@@ -189,7 +197,7 @@ def wait_ready(role, port, alias, timeout=600):
         if unit_state(unit) not in {"active", "activating"}:
             raise ExecutionError("Execution VM stopped before startup completed")
         serial = (directory / "serial.log").read_text(errors="replace")[-65536:]
-        if "PAAS_EXECUTION_READY" in serial or re.search(r"Cloud-init v\..*finished at", serial):
+        if "PAAS_EXECUTION_READY" in serial or (not require_marker and re.search(r"Cloud-init v\..*finished at", serial)):
             try:
                 ssh(port, alias, "sudo -n docker info --format '{{.ServerVersion}}'", timeout=10)
                 return
@@ -215,6 +223,49 @@ def prepare_template():
         (ROOT / "template.qcow2.next").replace(ROOT / "template.qcow2")
         (ROOT / "template.qcow2").chmod(0o644)
         print("Clean Docker golden template prepared", flush=True)
+
+
+def prepare_builder_base(reference):
+    """Seal only a clean guest and operator-pinned Node layers, never a tenant overlay."""
+    reference = builder_profile.node_image(reference)
+    with lock("builder"):
+        if unit_state("paas-builder.service") not in {"inactive", "failed"}:
+            raise ExecutionError("Wait for the current disposable builder to stop")
+        admit_space("builder", incoming=6 * 1024**3)
+        generation = secrets.token_hex(12)
+        alias = "builder-prewarm-" + generation
+        directory = reset_disk("builder")
+        systemctl("start", "paas-builder.service")
+        try:
+            wait_ready("builder", 22099, alias, timeout=180)
+            print("Preparing trusted Node layers in a clean builder guest", flush=True)
+            dockerfile = ("FROM " + reference + " AS build\nWORKDIR /app\nRUN [\"node\", \"--version\"]\n").encode()
+            log = ssh(22099, alias, "sudo -n docker build --platform linux/amd64 --network none "
+                      "--progress=plain --tag poteto-builder-prewarm:1 -",
+                      data=dockerfile, timeout=420)
+            print(log.stderr.decode(errors="replace")[-6000:], flush=True)
+            ssh(22099, alias, "sudo -n systemctl disable --now docker.service docker.socket && "
+                "sudo -n rm -f /etc/docker/key.json /var/lib/docker/engine-id && "
+                "sudo -n cloud-init clean --logs --machine-id")
+        finally:
+            systemctl("stop", "paas-builder.service")
+        result = subprocess.run(["systemctl", "show", "paas-builder.service", "--property=Result", "--value"],
+                                check=True, capture_output=True, timeout=10)
+        if result.stdout.strip() != b"success":
+            raise ExecutionError("Builder did not shut down cleanly; template was not sealed")
+        base = builder_profile.base_path(ROOT, generation)
+        pending = base.with_suffix(".next")
+        try:
+            subprocess.run(["qemu-img", "convert", "-O", "qcow2", str(directory / "root.qcow2"), str(pending)],
+                           check=True, capture_output=True, timeout=240)
+            pending.chmod(0o644)
+            pending.replace(base)
+            write_json(ROOT / builder_profile.PROFILE, {
+                "generation": generation, "node_image": reference, "created": time.time(),
+            }, durable=True)
+        finally:
+            pending.unlink(missing_ok=True)
+        print("Prepared static builder base: " + generation, flush=True)
 
 
 def runtime(account_id, deploy_key=None):
@@ -390,7 +441,7 @@ def build_log_chunk(build_id, offset):
     return {'data': base64.b64encode(chunk).decode('ascii')}
 
 
-def collect_build_output(command, path, timeout, *, archive=None, env=None, archive_limit=1024**3):
+def collect_build_output(command, path, timeout, *, archive=None, env=None, archive_limit=1024**3, intro=b""):
     """Drain logs while receiving a bounded JSON receipt or image archive."""
     deadline = time.monotonic() + timeout
     receipt = bytearray()
@@ -398,6 +449,7 @@ def collect_build_output(command, path, timeout, *, archive=None, env=None, arch
     image = archive.open("xb") if archive else nullcontext()
     with image as output, path.open('wb', buffering=0) as log, selectors.DefaultSelector() as selector, \
             subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env) as process:
+        log.write(intro)
         selector.register(process.stdout, selectors.EVENT_READ, 'receipt')
         selector.register(process.stderr, selectors.EVENT_READ, 'log')
         try:
@@ -428,29 +480,67 @@ def collect_build_output(command, path, timeout, *, archive=None, env=None, arch
                 process.kill()
 
 
+def provision_builder(alias, job, spec):
+    modules = {
+        "execution/guest_build.py": "opt/paas-execution/guest_build.py",
+        "execution/build_source.py": "opt/paas-execution/build_source.py",
+        "publisher/archive.py": "opt/paas-execution/publisher/archive.py",
+        "publisher/__init__.py": "opt/paas-execution/publisher/__init__.py",
+    }
+    # The source remains an opaque inner archive. Only fixed platform-owned
+    # member names are ever passed to the guest's privileged tar command.
+    image_import = spec.get("runtime") == "image-import"
+    with tempfile.TemporaryFile() as stream:
+        with tarfile.open(fileobj=stream, mode="w") as bundle:
+            for source, target in modules.items():
+                bundle.add(CODE / source, arcname=target)
+            payload = json.dumps(spec).encode()
+            entry = tarfile.TarInfo("work/spec.json")
+            entry.size, entry.mode = len(payload), 0o600
+            bundle.addfile(entry, io.BytesIO(payload))
+            if not image_import:
+                bundle.add(job / "source.tar.gz", arcname="work/source.tar.gz")
+        stream.seek(0)
+        result = subprocess.run(["/opt/paas-execution/ssh-stream", "22099", alias,
+                                 "sudo -n tar --no-same-owner --no-same-permissions -xf - -C / && "
+                                 "cat /proc/sys/kernel/random/boot_id"],
+                                stdin=stream, capture_output=True, check=True, timeout=120)
+    boot_id = result.stdout.decode().strip()
+    if not re.fullmatch(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", boot_id):
+        raise ExecutionError("Disposable builder did not report a valid boot identity")
+    if image_import:
+        with (job / "source.tar.gz").open("rb") as archive:
+            subprocess.run(["/opt/paas-execution/ssh-stream", "22099", alias, "sudo -n tee /work/source.tar.gz >/dev/null"],
+                           stdin=archive, capture_output=True, check=True, timeout=120)
+    return boot_id
+
+
 def build_in_vm(build_id, job, spec):
     (ROOT / 'active-build').write_text(build_id)
     (ROOT / 'last-build').write_text(build_id)
     alias = "build-" + build_id
     try:
+        profile = builder_profile.load(ROOT) if spec.get("output_kind") == "static" else None
+        started = time.monotonic()
         systemctl("stop", "paas-builder.service")
-        reset_disk("builder")
+        reset_disk("builder", profile=profile)
         systemctl("start", "paas-builder.service")
-        wait_ready("builder", 22099, alias, timeout=180)
-        boot_id = ssh(22099, alias, "cat /proc/sys/kernel/random/boot_id").stdout.decode().strip()
-        write_json(job / "status.json", {"id": build_id, "state": "running", "driver": "vm", "boot_id": boot_id})
-        ssh(22099, alias, "sudo -n mkdir -p /work /opt/paas-execution/publisher")
-        for path, target in [(CODE / "execution/guest_build.py", "/opt/paas-execution/guest_build.py"),
-                             (CODE / "execution/build_source.py", "/opt/paas-execution/build_source.py"),
-                             (CODE / "publisher/archive.py", "/opt/paas-execution/publisher/archive.py"),
-                             (CODE / "publisher/__init__.py", "/opt/paas-execution/publisher/__init__.py")]:
-            ssh(22099, alias, "sudo -n tee " + target + " >/dev/null", data=path.read_bytes())
-        ssh(22099, alias, "sudo -n tee /work/spec.json >/dev/null", data=json.dumps(spec | {"id": build_id}).encode())
-        with (job / "source.tar.gz").open("rb") as source:
-            subprocess.run(["/opt/paas-execution/ssh-stream", str(22099), alias, "sudo -n tee /work/source.tar.gz >/dev/null"], stdin=source, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=True, timeout=120)
+        wait_ready("builder", 22099, alias, timeout=180, require_marker=bool(profile))
+        ready = time.monotonic()
+        guest_spec = spec | {"id": build_id}
+        if profile:
+            guest_spec["builder_node_image"] = profile["node_image"]
+        boot_id = provision_builder(alias, job, guest_spec)
+        metrics = {"boot_id": boot_id, "vm_boot_seconds": round(ready - started, 1),
+                   "vm_setup_seconds": round(time.monotonic() - ready, 1)}
+        if profile:
+            metrics["builder_generation"] = profile["generation"]
+        write_json(job / "status.json", {"id": build_id, "state": "running", "driver": "vm"} | metrics)
         command = ['/opt/paas-execution/ssh-stream', '22099', alias,
                    'sudo -n env POTETO_STREAM_BUILD_LOG=1 python3 /opt/paas-execution/guest_build.py']
-        result = collect_build_output(command, job / 'build.log', timeout=900)
+        base = 'prepared Node base' if profile else 'standard base'
+        intro = f"Disposable builder: {metrics['vm_boot_seconds']}s boot, {metrics['vm_setup_seconds']}s setup ({base})\n"
+        result = collect_build_output(command, job / 'build.log', timeout=900, intro=intro.encode())
         if result['state'] != 'succeeded':
             raise ExecutionError("Application build failed; inspect deployment logs")
         if spec.get("output_kind") == "static":
@@ -466,7 +556,7 @@ def build_in_vm(build_id, job, spec):
                 pending.replace(job / "static.tar.gz")
             finally:
                 pending.unlink(missing_ok=True)
-            return {"output_kind": "static", "artifact_bytes": size, "boot_id": boot_id}
+            return {"output_kind": "static", "artifact_bytes": size} | metrics
         image_disk_bytes=int(ssh(22099,alias,'sudo -n docker image inspect --format "{{.Size}}" paas-release:'+build_id).stdout.strip())
         if not 0<image_disk_bytes<=16*1024**3:
             raise ExecutionError('Built image disk size is invalid')
@@ -487,7 +577,7 @@ def build_in_vm(build_id, job, spec):
                 process.terminate()
                 process.wait(timeout=10)
         (job / "image.tar.next").replace(job / "image.tar")
-        return {"image": "paas-release:" + build_id, "image_bytes": size, "image_disk_bytes": image_disk_bytes, "boot_id": boot_id}
+        return {"image": "paas-release:" + build_id, "image_bytes": size, "image_disk_bytes": image_disk_bytes} | metrics
     finally:
         systemctl("stop", "paas-builder.service")
         (ROOT / 'active-build').unlink(missing_ok=True)
@@ -878,6 +968,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if parts[1] != "builds" or not 0 < size <= 1024**3:
                 raise ValueError("Invalid build upload")
             spec = json.loads(base64.urlsafe_b64decode(self.headers["X-Paas-Build-Spec"]))
+            if "builder_node_image" in spec:
+                raise ValueError("Builder base images are selected by the executor")
             leases.enter_context(active_account(spec["account_id"]))
             if 'project_id' in spec:
                 checked_id(spec['project_id'])
@@ -945,6 +1037,8 @@ def main():
         http.server.ThreadingHTTPServer(("127.0.0.1", 21999), Handler).serve_forever()
     elif command == "prepare-template":
         prepare_template()
+    elif command == "prepare-builder-base":
+        prepare_builder_base(sys.argv[2])
     elif command == "run-build":
         run_build(sys.argv[2])
     elif command == 'finish-build':

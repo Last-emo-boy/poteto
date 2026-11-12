@@ -1,6 +1,7 @@
 """Validate source and resolve one Docker build context for either driver."""
 import json
 from pathlib import Path
+import re
 from urllib.parse import urlsplit
 from publisher.archive import unpack
 
@@ -21,7 +22,11 @@ def dockerfile(spec, *, cached=False):
     if runtime == "static" and not spec.get("build_command"):
         return "FROM nginx:1.28-alpine\nCOPY . /usr/share/nginx/html/\n"
     run = "RUN --mount=type=cache,target=/root/.npm,sharing=locked " if cached else "RUN "
-    lines = ["FROM node:24-alpine AS build", "WORKDIR /app", "COPY . .", run + json.dumps(npm_command(spec, 'ci'))]
+    base = spec.get("builder_node_image", "node:24-alpine")
+    if base != "node:24-alpine" and (spec.get("output_kind") != "static" or not isinstance(base, str) or not re.fullmatch(
+            r"docker\.io/library/node:24-alpine@sha256:[a-f0-9]{64}", base)):
+        raise ValueError("Invalid prepared builder image")
+    lines = ["FROM " + base + " AS build", "WORKDIR /app", "COPY . .", run + json.dumps(npm_command(spec, 'ci'))]
     if spec.get("build_command"):
         lines.append("RUN " + json.dumps(["sh", "-c", spec["build_command"]]))
     if runtime == "static":
