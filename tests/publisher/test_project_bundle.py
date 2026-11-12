@@ -4,6 +4,7 @@ from pathlib import Path
 import stat
 import tempfile
 import unittest
+from unittest.mock import patch
 import zipfile
 from publisher.project_bundle import BoundedZipInput,BundleError,unpack_bundle
 from test_control import archive
@@ -77,6 +78,19 @@ class BundleTests(unittest.TestCase):
             result.writestr('manifest.json',json.dumps(self.manifest));result.writestr('image.tar',b'nginx base')
             result.writestr('source.tar.gz',archive());result.writestr('nginx.conf',b'events {}')
         self.assertTrue(unpack_bundle(self.project,self.destination).legacy_static)
+
+    def test_prebuilt_image_bundle_uses_image_expansion_limit(self):
+        self.manifest.update(configuration={'runtime':'image'},resources=[])
+        with zipfile.ZipFile(self.project,'w') as result:
+            result.writestr('manifest.json',json.dumps(self.manifest))
+            result.writestr('source.tar.gz',archive())
+            result.writestr('image.tar',b'canonical image')
+        from publisher.archive import unpack
+        with patch('publisher.project_bundle.unpack', wraps=unpack) as extract:
+            value=unpack_bundle(self.project,self.destination)
+        self.assertEqual('image',value.configuration.runtime)
+        self.assertEqual(512*1024**2,extract.call_args.kwargs['max_bytes'])
+        self.assertEqual(1024,extract.call_args.kwargs['max_files'])
 
     def test_prebuilt_static_bundle_needs_only_the_validated_source(self):
         self.manifest.update(configuration={'runtime':'static'},resources=[],image='static-artifact')
