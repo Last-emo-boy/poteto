@@ -47,9 +47,10 @@ def request_id_token(client_id, request):
 
 
 class CliLogin:
-    def __init__(self, client_id, subjects):
+    def __init__(self, client_id, subjects, *, auto_provision=False):
         self.client_id = client_id
         self.subjects = subjects
+        self.auto_provision = auto_provision
         self.keys = jwt.PyJWKClient(ISSUER + "/jwks", timeout=5)
         self.in_flight = BoundedSemaphore(4)
 
@@ -63,12 +64,13 @@ class CliLogin:
             raise Problem(502, "IF.Link signing keys are temporarily unavailable") from None
         except jwt.PyJWTError:
             raise Problem(401, "IF.Link identity could not be verified") from None
-        nonce = claims["nonce"]
+        nonce, subject = claims["nonce"], claims["sub"]
         if (not isinstance(nonce, str) or not nonce.isascii() or not secrets.compare_digest(nonce, request.nonce)
+                or not isinstance(subject, str) or not 1 <= len(subject) <= 255
                 or claims.get("azp", self.client_id) != self.client_id
                 or claims["aud"] not in (self.client_id, [self.client_id])):
             raise Problem(401, "IF.Link identity does not match this Poteto login")
-        return claims["sub"]
+        return subject
 
     def register(self, app, store, actor):
         @app.get(LOGIN_PATH, tags=["Account"])
@@ -84,15 +86,17 @@ class CliLogin:
             finally:
                 self.in_flight.release()
             project_id = self.subjects.get(subject)
-            if project_id is None:
+            if project_id is None and not self.auto_provision:
                 raise Problem(403, "This IF.Link account has not been approved for Poteto CLI login")
             with store.connection() as db:
+                if project_id is None:
+                    project_id = store.enroll_cli_identity(db, ISSUER, subject)
                 project = db.execute(
                     "SELECT p.account_id FROM projects p JOIN accounts a ON a.id=p.account_id "
                     "WHERE p.id=? AND p.state='active' AND a.enabled=1", (project_id,),
                 ).fetchone()
                 if project is None:
-                    raise Problem(403, "The approved Poteto project is no longer available")
+                    raise Problem(403, "The linked Poteto project is no longer available")
                 grant = store.mint_token(db, {"id": None, "account_id": project["account_id"]},
                                          name="Poteto CLI", scopes=[PREVIEW_SCOPE], project_ids=[project_id],
                                          expires=time.time() + 7 * 86400, action=LOGIN_ISSUE)
@@ -115,10 +119,12 @@ def load_login():
         return None
     config = json.loads(Path(path).read_text())
     client_id = config["client_id"]
-    subjects = config["projects_by_subject"]
+    subjects = config.get("projects_by_subject", {})
+    auto_provision = config.get("auto_provision", False)
     if (not isinstance(client_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", client_id)
-            or not isinstance(subjects, dict) or not subjects
+            or type(auto_provision) is not bool or not isinstance(subjects, dict)
+            or not (auto_provision or subjects)
             or not all(isinstance(k, str) and 1 <= len(k) <= 255 and isinstance(v, str)
                        and re.fullmatch(r"[a-f0-9]{24}", v) for k, v in subjects.items())):
         raise ValueError("Invalid Poteto IF.Link client ID or approved project bindings")
-    return CliLogin(client_id, subjects)
+    return CliLogin(client_id, subjects, auto_provision=auto_provision)

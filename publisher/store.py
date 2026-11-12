@@ -42,6 +42,10 @@ CREATE TABLE IF NOT EXISTS projects (
  current_deployment TEXT, environment TEXT NOT NULL, created REAL NOT NULL,
  state TEXT NOT NULL DEFAULT 'active',
  UNIQUE(account_id, name));
+CREATE TABLE IF NOT EXISTS cli_identities (
+ issuer TEXT NOT NULL, subject TEXT NOT NULL,
+ project_id TEXT NOT NULL UNIQUE REFERENCES projects(id),
+ PRIMARY KEY (issuer, subject));
 CREATE TABLE IF NOT EXISTS deployments (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), state TEXT NOT NULL,
  config TEXT NOT NULL, environment TEXT NOT NULL, artifact_bytes INTEGER NOT NULL DEFAULT 0,
@@ -268,14 +272,32 @@ class Store:
                 raise Problem(401,"Invalid or expired platform token")
             if db.execute("SELECT count(*) FROM projects WHERE account_id=? AND state!='deleted'", (actor["account_id"],)).fetchone()[0] >= account["max_projects"]:
                 raise Problem(429, "Project quota reached")
-            project_id = ident()
-            domain=self.settings.new_app_domain or self.settings.domain
-            try:
-                db.execute("INSERT INTO projects(id,account_id,name,current_deployment,environment,created,app_domain) VALUES(?,?,?,?,?,?,?)", (project_id, actor["account_id"], name, None, self.seal({}), time.time(),domain))
-            except sqlite3.IntegrityError:
-                raise Problem(409, "Project name already exists") from None
-            self.audit(db, actor, "project.create", project_id)
+            return self.insert_project(db, actor, name)
+
+    def insert_project(self, db, actor, name):
+        project_id = ident()
+        domain = self.settings.new_app_domain or self.settings.domain
+        try:
+            db.execute("INSERT INTO projects(id,account_id,name,current_deployment,environment,created,app_domain) VALUES(?,?,?,?,?,?,?)",
+                       (project_id, actor["account_id"], name, None, self.seal({}), time.time(), domain))
+        except sqlite3.IntegrityError:
+            raise Problem(409, "Project name already exists") from None
+        self.audit(db, actor, "project.create", project_id)
         return {"id": project_id, "name": name, "url": "https://" + self.settings.hostname(project_id,domain=domain), "current_deployment": None}
+
+    def enroll_cli_identity(self, db, issuer, subject):
+        bound = db.execute("SELECT project_id FROM cli_identities WHERE issuer=? AND subject=?",
+                           (issuer, subject)).fetchone()
+        if bound is not None:
+            return bound["project_id"]
+        account_id = ident()
+        db.execute("INSERT INTO accounts(id,name,max_projects,max_concurrent,created) VALUES(?,?,1,1,?)",
+                   (account_id, "iflink-" + account_id, time.time()))
+        actor = {"id": None, "account_id": account_id}
+        self.audit(db, actor, "account.cli-enroll", account_id)
+        project_id = self.insert_project(db, actor, "preview")["id"]
+        db.execute("INSERT INTO cli_identities VALUES(?,?,?)", (issuer, subject, project_id))
+        return project_id
 
     def rename_project(self, actor, project_id, name):
         with self.connection() as db:

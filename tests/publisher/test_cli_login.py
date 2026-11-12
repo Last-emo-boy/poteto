@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import redirect_stdout
 import base64
 import hashlib
@@ -23,7 +24,7 @@ from publisher import cli
 from publisher.api import create_app
 from publisher.config import Settings
 from publisher.login_contract import DEFAULT_URL, ISSUER, LOGIN_PATH, REDIRECT_URI
-from publisher.store import Store
+from publisher.store import PREVIEW_SCOPE, Store
 
 
 class CliLoginTests(unittest.TestCase):
@@ -163,6 +164,75 @@ class CliLoginTests(unittest.TestCase):
                     r = self.api.post(LOGIN_PATH, json=self.body)
                 self.assertEqual(status, r.status_code, r.text)
                 self.assertNotIn("token", r.json())
+
+    def open_enrollment(self):
+        config = json.loads(self.config.read_text())
+        config["auto_provision"] = True
+        self.config.write_text(json.dumps(config))
+        with patch.dict(os.environ, {"PAAS_OIDC_CONFIG_FILE": str(self.config)}):
+            api = TestClient(create_app(self.settings))
+        self.addCleanup(api.close)
+        return api
+
+    def test_open_enrollment_reuses_one_workspace_and_keeps_tokens_isolated(self):
+        api = self.open_enrollment()
+
+        def provider(request, timeout):
+            subject = parse_qs(request.data.decode())["code"][0]
+            return self.token_response(self.body["nonce"], sub=subject)
+
+        def exchange(subject):
+            r = api.post(LOGIN_PATH, json=self.body | {"code": subject})
+            self.assertEqual(201, r.status_code, r.text)
+            return r.json()
+
+        with (patch("publisher.oidc_login.urlopen", side_effect=provider),
+              patch.object(jwt.PyJWKClient, "fetch_data", return_value=self.jwks)):
+            with ThreadPoolExecutor(max_workers=3) as pool:
+                first, repeat, other = list(pool.map(exchange, ("new-a", "new-a", "new-b")))
+            legacy = exchange("allowed-logto-user")
+
+        project = first["project_id"]
+        self.assertEqual(project, repeat["project_id"])
+        self.assertNotEqual(first["id"], repeat["id"])
+        self.assertNotEqual(project, other["project_id"])
+        self.assertEqual(self.project, legacy["project_id"])
+        self.assertEqual([PREVIEW_SCOPE], first["scopes"])
+        self.assertEqual([project], first["project_ids"])
+
+        headers = {"Authorization": "Bearer " + first["token"]}
+        self.assertEqual(201, api.post(f"/v1/projects/{project}/deployments",
+                                      headers=headers, json={"target": "preview"}).status_code)
+        self.assertEqual(403, api.post(f"/v1/projects/{project}/deployments",
+                                      headers=headers, json={"target": "production"}).status_code)
+        self.assertEqual(404, api.post(f"/v1/projects/{other['project_id']}/deployments",
+                                      headers=headers, json={"target": "preview"}).status_code)
+        self.assertEqual(403, api.post("/v1/projects", headers=headers, json={"name": "extra"}).status_code)
+        with self.store.connection() as db:
+            self.assertEqual(2, db.execute("SELECT count(*) FROM cli_identities").fetchone()[0])
+            self.assertEqual(3, db.execute("SELECT count(*) FROM accounts").fetchone()[0])
+            self.assertEqual(1, db.execute("SELECT count(*) FROM tokens WHERE name='account-owner'").fetchone()[0])
+            self.assertEqual("poteto.best", db.execute("SELECT app_domain FROM projects WHERE id=?",
+                                                      (project,)).fetchone()[0])
+            db.execute("UPDATE accounts SET enabled=0 WHERE id=(SELECT account_id FROM projects WHERE id=?)",
+                       (project,))
+        with (patch("publisher.oidc_login.urlopen", side_effect=provider),
+              patch.object(jwt.PyJWKClient, "fetch_data", return_value=self.jwks)):
+            self.assertEqual(403, api.post(LOGIN_PATH, json=self.body | {"code": "new-a"}).status_code)
+        self.assertEqual(401, api.get("/v1/me", headers=headers).status_code)
+        with self.store.connection() as db:
+            self.assertEqual(3, db.execute("SELECT count(*) FROM accounts").fetchone()[0])
+
+    def test_open_enrollment_requires_verified_identity_before_creating_resources(self):
+        api = self.open_enrollment()
+        for claims in ({"aud": "other-app"}, {"nonce": "x" * 43}, {"sub": ""}):
+            with self.subTest(claims=claims), patch.object(jwt.PyJWKClient, "fetch_data", return_value=self.jwks):
+                payload = {"sub": "new-user", "nonce": self.body["nonce"]} | claims
+                with patch("publisher.oidc_login.urlopen", return_value=self.token_response(**payload)):
+                    self.assertEqual(401, api.post(LOGIN_PATH, json=self.body).status_code)
+        with self.store.connection() as db:
+            self.assertEqual(0, db.execute("SELECT count(*) FROM cli_identities").fetchone()[0])
+            self.assertEqual(1, db.execute("SELECT count(*) FROM accounts").fetchone()[0])
 
     def test_disabled_and_maintenance_preserve_the_existing_auth_boundary(self):
         with patch.dict(os.environ, {"PAAS_OIDC_CONFIG_FILE": ""}):
