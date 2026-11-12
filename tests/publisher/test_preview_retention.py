@@ -3,7 +3,7 @@ from pathlib import Path
 import tempfile
 import time
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
 from publisher.api import create_app
@@ -80,6 +80,12 @@ class RetentionTests(unittest.TestCase):
         self.assertEqual(jobs[0],self.client.get(self.base).json()['recent_jobs'][0]['id'])
         self.assertEqual(old,self.client.get(self.base).json()['recent_jobs'][0]['deployment_id'])
         self.reset_scan();self.assertEqual([],enqueue_due(self.store))
+
+    def test_first_worker_pass_schedules_even_on_a_freshly_booted_host(self):
+        old=self.release();self.release(days=0);self.enable()
+        with patch('publisher.worker.time.monotonic',return_value=10):
+            self.assertTrue(self.worker.run_once())
+        self.assertIsNone(self.state(old))
 
     def test_protection_matches_prune_for_production_history_data_and_active_work(self):
         removable = self.release();latest = self.release(days=0)

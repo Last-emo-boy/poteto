@@ -24,7 +24,7 @@ class Worker:
         self.backend.store = store
         self.owner = socket.gethostname() + "-" + ident()
         self.job = None
-        self.last_maintenance = 0
+        self.last_maintenance = None
         self.logs_only = logs_only
         self.static_previews_only = static_previews_only
 
@@ -80,7 +80,8 @@ class Worker:
                 return
 
     def run_once(self):
-        if not (self.logs_only or self.static_previews_only) and time.monotonic() - self.last_maintenance > 60:
+        if not (self.logs_only or self.static_previews_only) and (
+                self.last_maintenance is None or time.monotonic() - self.last_maintenance > 60):
             self.store.expire_uploads()
             from publisher.project_exports import expire
             expire(self.store)
