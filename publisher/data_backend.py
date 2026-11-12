@@ -19,6 +19,22 @@ class DataBackend:
     def request(self,resource,action,**fields):
         return self.client.data(self.account(resource['project_id']),resource['id'],resource['project_id'],action,**fields)
 
+    def wait_for_database_container(self, resource, compose, check):
+        # Image transfer is a supervised deployment stage, not database health.
+        deadline = time.monotonic() + 300
+        while time.monotonic() < deadline:
+            check()
+            if self.request(resource, 'inspect-database')['container']:
+                return
+            operations = self.backend.api('deployment.allByCompose', query={'composeId': compose})
+            states = {row.get('status') for row in operations}
+            if states - {'queued', 'running', 'done', 'error'}:
+                raise BackendError('PostgreSQL deployment state is unknown; inspect its existing operation')
+            if states and not states & {'queued', 'running'}:
+                raise BackendError('PostgreSQL deployment ended without a container; inspect its existing operation')
+            time.sleep(2)
+        raise BackendError('PostgreSQL container launch did not complete; inspect the existing deployment before retrying')
+
     def create(self,resource,check,*,import_id=None):
         account=self.account(resource['project_id'])
         target=RuntimeRegistry(self.backend).ensure(account)
@@ -49,6 +65,7 @@ class DataBackend:
         check()
         if not current:
             self.backend.start_compose(compose,'Managed PostgreSQL '+rid)
+            self.wait_for_database_container(resource, compose, check)
         deadline=time.monotonic()+180
         while time.monotonic()<deadline:
             check()

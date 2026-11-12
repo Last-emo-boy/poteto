@@ -86,11 +86,31 @@ class DataTests(unittest.TestCase):
         backend=Mock();backend.store=self.store;backend.create_compose.return_value='compose'
         registry=Mock();registry.ensure.return_value={'server_id':'server'}
         with patch('publisher.data_backend.RuntimeRegistry',return_value=registry), \
-             patch.object(DataBackend,'request',side_effect=[{}, {'container':None}, {'ready':True}]):
+             patch.object(DataBackend,'request',side_effect=[{}, {'container':None}, {'container':{'Id':'database'}}, {'ready':True}]):
             DataBackend(backend).create(resource,lambda:None)
         config=backend.create_compose.call_args.args[1]
         probe=config['services']['postgres']['healthcheck']['test']
         self.assertEqual(['CMD','pg_isready','-h','127.0.0.1','-U','paas_admin','-d','app'],probe)
+
+    def test_database_launch_observes_the_existing_pull_before_health_checks(self):
+        backend=Mock()
+        backend.api.return_value=[{'status':'running'}]
+        data=DataBackend(backend)
+        with patch.object(data, 'request', side_effect=[{'container':None}, {'container':{'Id':'database'}}]), \
+             patch('publisher.data_backend.time.sleep') as sleep:
+            data.wait_for_database_container({'id':'resource'},'compose',lambda:None)
+        backend.api.assert_called_once_with('deployment.allByCompose',query={'composeId':'compose'})
+        backend.start_compose.assert_not_called()
+        sleep.assert_called_once_with(2)
+
+    def test_database_launch_fails_on_terminal_supervisor_error(self):
+        backend=Mock();backend.api.return_value=[{'status':'error'}]
+        data=DataBackend(backend)
+        with patch.object(data,'request',return_value={'container':None}), \
+             patch('publisher.data_backend.time.sleep') as sleep:
+            with self.assertRaisesRegex(Exception,'ended without a container'):
+                data.wait_for_database_container({'id':'resource'},'compose',lambda:None)
+        sleep.assert_not_called()
 
     def test_data_delete_requires_explicit_intent_and_no_retained_bindings(self):
         resource=self.resource('volumes',ready=True);path='/v1/data/'+resource['id']
