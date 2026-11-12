@@ -6,12 +6,14 @@ import json
 import os
 from pathlib import Path
 import socket
+import ssl
 import tarfile
 import tempfile
 from threading import Thread
 import unittest
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.error import URLError
 from urllib.request import urlopen
 
 from publisher import cli, cli_login
@@ -24,10 +26,22 @@ class PortableClientTests(unittest.TestCase):
         first = {'logs': [{'message': str(i)} for i in range(500)], 'next_cursor': 500}
         last = {'logs': [{'message': 'last log'}], 'next_cursor': 501}
         output = io.StringIO()
-        with patch.object(client, 'request', side_effect=[ready, first, last]) as request, redirect_stderr(output):
+        interrupted = URLError(ssl.SSLEOFError(8, 'transport interrupted'))
+        with patch.object(client, 'request', side_effect=[ready, first, interrupted, last]) as request, \
+             patch('publisher.cli.time.sleep'), redirect_stderr(output):
             self.assertEqual(ready, client.wait('fixture', 10))
         self.assertIn('last log\nready\n', output.getvalue())
+        self.assertEqual(1, output.getvalue().splitlines().count('499'))
+        self.assertEqual(request.call_args_list[-2].args, request.call_args.args)
         self.assertTrue(request.call_args.args[1].endswith('?after=500'))
+
+    def test_wait_does_not_retry_a_certificate_error(self):
+        client = cli.Client('https://deploy.iflink.tech')
+        failure = URLError(ssl.SSLCertVerificationError(1, 'certificate rejected'))
+        with patch.object(client, 'request', side_effect=failure) as request:
+            with self.assertRaises(URLError):
+                client.wait('fixture', 10)
+        request.assert_called_once()
 
     def test_directory_link_upload_inspect_and_scope_error_over_real_http(self):
         project, release = "a"*24, "b"*24

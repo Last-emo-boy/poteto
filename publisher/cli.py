@@ -2,10 +2,12 @@
 """Portable publishing client. Uses Python's standard library only."""
 import argparse
 import getpass
+import http.client
 import json
 import os
 import re
 from pathlib import Path
+import ssl
 import subprocess
 import sys
 import time
@@ -32,7 +34,7 @@ class Client:
     def __init__(self, url, token=None):
         self.url, self.token = url.rstrip("/"), token
 
-    def request(self, method, path, body=None, raw=False, *, idempotency_key=None):
+    def request(self, method, path, body=None, raw=False, *, idempotency_key=None, timeout=180):
         headers = {"User-Agent": "Poteto/" + VERSION}
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
@@ -45,7 +47,7 @@ class Client:
             body = json.dumps(body).encode()
         request = urllib.request.Request(self.url + path, body, headers, method=method)
         try:
-            with urllib.request.urlopen(request, timeout=180) as response:
+            with urllib.request.urlopen(request, timeout=timeout) as response:
                 data = response.read()
                 return json.loads(data) if data else None
         except urllib.error.HTTPError as error:
@@ -58,12 +60,29 @@ class Client:
 
     def wait(self, release_id, timeout):
         deadline = time.monotonic() + timeout
+        expired = f"Timed out waiting; deployment {release_id} continues server-side"
+
+        def observe(path):
+            interrupted = False
+            while (remaining := deadline - time.monotonic()) > 0:
+                try:
+                    return self.request('GET', path, timeout=min(30, remaining))
+                except (OSError, http.client.HTTPException) as error:
+                    cause = error.reason if isinstance(error, urllib.error.URLError) else error
+                    if isinstance(cause, ssl.SSLCertVerificationError):
+                        raise
+                    if not interrupted:
+                        print(f'Connection interrupted; still watching deployment {release_id}', file=sys.stderr, flush=True)
+                        interrupted = True
+                    time.sleep(min(2, max(0, deadline - time.monotonic())))
+            raise RuntimeError(expired)
+
         previous = None
         cursor = 0
         while time.monotonic() < deadline:
-            release = self.request("GET", "/v1/deployments/" + release_id)
+            release = observe('/v1/deployments/' + release_id)
             while True:
-                logs = self.request("GET", f"/v1/deployments/{release_id}/logs?after={cursor}")
+                logs = observe(f'/v1/deployments/{release_id}/logs?after={cursor}')
                 for line in logs["logs"]:
                     print(line["message"], file=sys.stderr, flush=True)
                 if len(logs["logs"]) < 500:
@@ -79,8 +98,8 @@ class Client:
                 if release["state"] != "ready":
                     raise RuntimeError(release["error"] or "Deployment did not become ready")
                 return release
-            time.sleep(2)
-        raise RuntimeError(f"Timed out waiting; deployment {release_id} continues server-side")
+            time.sleep(min(2, max(0, deadline - time.monotonic())))
+        raise RuntimeError(expired)
 
     def wait_job(self, job_id, timeout=900):
         deadline=time.monotonic()+timeout
