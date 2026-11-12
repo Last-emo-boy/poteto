@@ -227,7 +227,12 @@ def create_app(settings=None):
                             raise Problem(413, "Source upload exceeds its limit")
                         out.write(chunk)
             try:
-                stats = unpack(path, None, max_bytes=settings.unpack_limit, max_files=settings.file_limit)
+                if json.loads(deployment["config"])["runtime"] == "image":
+                    from starlette.concurrency import run_in_threadpool
+                    stats = await run_in_threadpool(unpack, path, None, max_bytes=settings.unpack_limit,
+                                                    max_files=settings.file_limit, required_file="manifest.json")
+                else:
+                    stats = unpack(path, None, max_bytes=settings.unpack_limit, max_files=settings.file_limit)
             except ArchiveError as error:
                 raise Problem(422, str(error)) from None
             store.enqueue_upload(user, deployment_id, path, size, stats["unpacked_bytes"])

@@ -21,6 +21,7 @@ class Settings:
     static_artifacts: bool | tuple[str, ...] = False
     static_source_builds: bool = False
     sandbox_projects: tuple[str, ...] = ()
+    prebuilt_image_projects: tuple[str, ...] = ()
 
     def __post_init__(self):
         if not valid_domain(self.domain):
@@ -36,11 +37,12 @@ class Settings:
                 for project in self.static_artifacts)
         ):
             raise ValueError('static_artifacts must be a boolean or a list of project IDs')
-        if not isinstance(self.sandbox_projects, (tuple, list)) or not all(
-            isinstance(project, str) and re.fullmatch(r'[a-f0-9]{24}', project)
-            for project in self.sandbox_projects
-        ):
-            raise ValueError('sandbox_projects must be a list of project IDs')
+        for name in ('sandbox_projects', 'prebuilt_image_projects'):
+            projects = getattr(self, name)
+            if not isinstance(projects, (tuple, list)) or not all(
+                isinstance(project, str) and re.fullmatch(r'[a-f0-9]{24}', project) for project in projects
+            ):
+                raise ValueError(f'{name} must be a list of project IDs')
 
         if type(self.static_source_builds) is not bool:
             raise ValueError('static_source_builds must be a boolean')
@@ -69,7 +71,8 @@ class Settings:
                    new_app_domain=os.environ.get("PAAS_NEW_APP_DOMAIN",options.get('new_app_domain')) or None,
                    static_artifacts=runtime.get('static_artifacts', False),
                    static_source_builds=runtime.get('static_source_builds', False),
-                   sandbox_projects=runtime.get('sandbox_projects', ()))
+                   sandbox_projects=runtime.get('sandbox_projects', ()),
+                   prebuilt_image_projects=runtime.get('prebuilt_image_projects', ()))
 
     @property
     def db(self):

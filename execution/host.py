@@ -21,7 +21,7 @@ import tarfile
 import tempfile
 import time
 
-from execution import builder_profile, native_build, sandbox
+from execution import builder_profile, native_build, prebuilt_image, sandbox
 
 ROOT = Path(os.environ.get("PAAS_EXEC_ROOT", "/srv/ovh-paas-execution"))
 RESTORES = Path('/srv/ovh-paas-platform/restore')
@@ -599,9 +599,9 @@ def run_build(build_id):
     config = json.loads(config_path.read_text()) if config_path.exists() else {}
     if 'npm_registry' in config:
         spec['npm_registry'] = config['npm_registry']
-    with lock("builder"):
-        status_path = job / 'status.json'
-        driver = json.loads(status_path.read_text()).get('driver', 'vm') if status_path.exists() else 'vm'
+    status_path = job / 'status.json'
+    driver = json.loads(status_path.read_text()).get('driver', 'vm') if status_path.exists() else 'vm'
+    with lock("image-admission" if driver == "prebuilt" else "builder"):
         receipt = {'id': build_id, 'driver': driver}
         started = time.monotonic()
         write_json(status_path, receipt | {'state': 'running'})
@@ -620,6 +620,12 @@ def run_build(build_id):
                     stop_native_build(build_id)
             elif driver == 'vm':
                 result = build_in_vm(build_id, job, spec)
+            elif driver == 'prebuilt':
+                if spec.get('runtime') != 'image':
+                    raise ExecutionError('Invalid prebuilt image specification')
+                admit_space(incoming=3 * prebuilt_image.IMAGE_LIMIT + 4 * 1024**2)
+                result = prebuilt_image.normalize(job / 'source.tar.gz', job / 'image.tar', build_id)
+                (job / 'build.log').write_text('Validated linux/amd64 image; no server build or builder VM\n')
             else:
                 raise ExecutionError('Unknown build driver')
             write_json(status_path, receipt | result | {'state': 'succeeded', 'build_seconds': round(time.monotonic() - started, 1)})
@@ -987,6 +993,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 reference=spec.get('image_reference')
                 if self.headers.get('Content-Type')!='application/x-tar' or not isinstance(reference,str) or not re.fullmatch(r'(?:paas-release:[a-f0-9]{24}|sha256:[a-f0-9]{64})',reference):
                     raise ValueError('Invalid isolated image import')
+            elif spec.get("runtime") == "image":
+                if (self.headers.get('Content-Type') != 'application/gzip' or require_native
+                        or not spec.get('project_id') or size > prebuilt_image.TRANSPORT_LIMIT):
+                    raise ValueError('Invalid prebuilt image upload')
             elif spec.get("runtime") not in {"static", "node", "dockerfile"} or size>50*1024**2:
                 raise ValueError("Unsupported build runtime")
             admit_space('builder', incoming=size + 1024**3)
@@ -1011,7 +1021,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     else:
                         config_path = ROOT / 'config.json'
                         config = json.loads(config_path.read_text()) if config_path.exists() else {}
-                        driver = 'native' if output_kind == "image" and native_build.allowed(config, spec) else 'vm'
+                        if spec.get('runtime') == 'image':
+                            driver = 'prebuilt'
+                        else:
+                            driver = 'native' if output_kind == "image" and native_build.allowed(config, spec) else 'vm'
                         if require_native and driver != 'native':
                             raise ExecutionError('Project is no longer authorized for native builds')
                         pending.replace(job / "source.tar.gz")

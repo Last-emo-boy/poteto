@@ -20,7 +20,7 @@ if __package__:
     from .cli_login import default_token_file, login, logout
     from .cli_tools import VERSION, PlanError, deployment_config, initialize, pack, plan_deployment
     from .cli_project import deployment_reference, find_link, unlink, write_link
-    from .cli_prebuilt import build_static, read_prebuilt
+    from .cli_prebuilt import build_static, package_image, read_image, read_prebuilt
     from .login_contract import DEFAULT_URL, LOGIN_PATH
     from .transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
 else:
@@ -209,7 +209,9 @@ def _credential_file(url):
 
 def _show_plan(args, credential_file):
     try:
-        if args.prebuilt:
+        if args.prebuilt_image:
+            report, _ = read_image(args.directory, args.prebuilt_image, args.config, credential_file, production=args.prod)
+        elif args.prebuilt:
             report, _ = read_prebuilt(args.directory, production=args.prod)
         else:
             report = plan_deployment(args.directory, args.config, credential_file, preview=args.preview,
@@ -282,11 +284,14 @@ def main(prog="poteto"):
         build.add_argument("directory", type=Path, nargs="?", default=Path("."))
         build.add_argument("--config", type=Path, help="Build configuration JSON")
         build.add_argument("--preset", choices=["vite"])
+        build.add_argument("--from-image", help="Package a local linux/amd64 Docker image without rebuilding")
         plan = commands.add_parser("plan", help="Inspect a deployment locally without logging in or uploading")
         plan.add_argument("directory", type=Path, nargs="?", default=Path("."))
         plan.add_argument("--config", type=Path, help="Deployment configuration JSON")
         plan.add_argument("--preset", choices=["nextjs", "vite"], help="Apply a framework's build and runtime defaults")
-        plan.add_argument("--prebuilt", action="store_true", help="Inspect the static artifact from poteto build")
+        artifact = plan.add_mutually_exclusive_group()
+        artifact.add_argument("--prebuilt", action="store_true", help="Inspect the static artifact from poteto build")
+        artifact.add_argument("--prebuilt-image", type=Path, metavar="ARCHIVE", help="Inspect a packaged Docker image")
         target = plan.add_mutually_exclusive_group()
         target.add_argument("--preview", action="store_true")
         target.add_argument("--prod", action="store_true", help="Plan an explicit production deployment")
@@ -333,7 +338,9 @@ def main(prog="poteto"):
     deploy.add_argument("--config", type=Path, help="Deployment configuration JSON")
     if prog != "paas":
         deploy.add_argument("--preset", choices=["nextjs", "vite"])
-        deploy.add_argument("--prebuilt", action="store_true", help="Upload only the static artifact from poteto build")
+        artifact = deploy.add_mutually_exclusive_group()
+        artifact.add_argument("--prebuilt", action="store_true", help="Upload only the static artifact from poteto build")
+        artifact.add_argument("--prebuilt-image", type=Path, metavar="ARCHIVE", help="Publish a packaged Docker image without building")
     target = deploy.add_mutually_exclusive_group()
     target.add_argument("--preview", action="store_true")
     target.add_argument("--prod", action="store_true", help="Explicitly deploy to production")
@@ -386,6 +393,10 @@ def main(prog="poteto"):
     args.command = {"ls": "deployments", "inspect": "status"}.get(args.command, args.command)
     if getattr(args, "prebuilt", False) and (args.config is not None or args.preset):
         parser.error("Use --config and --preset with poteto build, not --prebuilt")
+    if getattr(args, "prebuilt_image", None) and args.preset:
+        parser.error("--prebuilt-image uses an existing image, not a framework preset")
+    if getattr(args, "from_image", None) and (args.config is not None or args.preset):
+        parser.error("--from-image packages an existing image; pass runtime --config to plan or deploy")
     if args.command in {"deploy", "redeploy"} and args.no_wait and args.url_only:
         parser.error("--url-only requires waiting for the release")
     if args.command == "env":
@@ -413,7 +424,8 @@ def main(prog="poteto"):
         if args.command in {"build", "plan"}:
             token_file = os.environ.get("POTETO_TOKEN_FILE") or os.environ.get("PAAS_TOKEN_FILE") or default_token_file()
             if args.command == "build":
-                result = build_static(args.directory, args.config, token_file, preset=args.preset)
+                result = (package_image(args.directory, args.from_image, token_file) if args.from_image
+                          else build_static(args.directory, args.config, token_file, preset=args.preset))
                 print(json.dumps(result, indent=2, ensure_ascii=False))
             else:
                 _show_plan(args, token_file)
@@ -532,6 +544,10 @@ def main(prog="poteto"):
                     raise RuntimeError("Deployment directory does not exist")
                 config = deployment_config(args.directory, args.config)
                 source = pack(args.directory, token_file)
+            elif args.prebuilt_image:
+                report, source = read_image(args.directory, args.prebuilt_image, args.config,
+                                            token_file or default_token_file(), production=args.prod)
+                config = report["configuration"]
             elif args.prebuilt:
                 report, source = read_prebuilt(args.directory, production=args.prod)
                 config = {"runtime": "static", "target": report["target"]}

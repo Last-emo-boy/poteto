@@ -395,6 +395,8 @@ class Store:
                     if PREVIEW_SCOPE in actor['scopes'] and not old['preview_access']:
                         raise Problem(409, "Idempotency key is already in use")
                     return dict(old)|{'app_domain':project['app_domain']}
+            if config['runtime'] == 'image' and project_id not in self.settings.prebuilt_image_projects:
+                raise Problem(403, "Prebuilt image deployment is not enabled for this project")
             self.check_concurrency(db, actor)
             driver = None
             if self.settings.artifact_enabled(project_id, config):

@@ -77,6 +77,19 @@ poteto deploy . --prebuilt --preview --url-only
 
 `build` runs trusted npm projects' locked install and configured build locally, then packages only the static output into `.poteto/output.tar.gz`. Plain HTML can be packaged without npm. Pass custom `--config` or `--preset` to `build`, not to `deploy --prebuilt`. Copy the archive to the same relative path in a separate CI publish job if needed. Prebuilt deployments default to preview; production still requires `--prod` and a production-capable credential. This path is for static output, including a completed Next.js static export; SSR and APIs continue to use the existing runtime paths.
 
+## Publish a prebuilt dynamic image
+
+For a project enabled in `prebuilt_image_projects` in the publisher runtime configuration, build your Linux image locally or in CI, then publish it without a server-side build:
+
+```sh
+docker buildx build --platform linux/amd64 --load -t my-app:preview .
+poteto build . --from-image my-app:preview
+poteto plan . --prebuilt-image .poteto/image.tar.gz --json
+poteto deploy . --prebuilt-image .poteto/image.tar.gz --preview --url-only
+```
+
+Use Docker Engine with API 1.48 or newer for platform-specific image export. Poteto accepts a single image (50 MiB compressed, 200 MiB expanded); build a lean final image. Use the image's entrypoint and listen on `0.0.0.0:$PORT` as UID 10001. Runtime settings such as the health check and database binding come from `poteto.json` or `--config`, not from build flags. The image is loaded only into the project's existing isolated tenant runtime. Existing source deployments are unchanged.
+
 ## Framework presets
 
 ```sh

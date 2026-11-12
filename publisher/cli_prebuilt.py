@@ -1,4 +1,5 @@
 """Build and publish a portable static artifact without sending source."""
+import gzip
 import io
 import os
 from pathlib import Path
@@ -9,18 +10,18 @@ import tempfile
 
 from .archive import ArchiveError, unpack
 from .cli_project import local_directory
-from .cli_tools import PlanError, pack, plan_deployment, upload_files
+from .cli_tools import PlanError, deployment_config, pack, plan_deployment, upload_files
 
 UPLOAD_LIMIT = 50 * 1024 * 1024
 UNPACK_LIMIT = 200 * 1024 * 1024
 FILE_LIMIT = 10000
 
 
-def _artifact(root):
+def _artifact(root, name="output.tar.gz"):
     if not root.is_dir():
         raise PlanError("missing_directory", "Deployment directory does not exist.")
     try:
-        path = local_directory(root) / "output.tar.gz"
+        path = local_directory(root) / name
     except ValueError as error:
         raise PlanError("invalid_artifact", str(error)) from None
     if path.is_symlink() or path.resolve() != path or (path.exists() and not path.is_file()):
@@ -28,12 +29,12 @@ def _artifact(root):
     return path
 
 
-def _inspect(source):
+def _inspect(source, *, entrypoint="index.html"):
     if len(source) > UPLOAD_LIMIT:
         raise PlanError("artifact_too_large", "Archive exceeds the server upload limit of 50 MiB")
     try:
         return unpack(io.BytesIO(source), None, max_bytes=UNPACK_LIMIT,
-                      max_files=FILE_LIMIT, required_file="index.html")
+                      max_files=FILE_LIMIT, required_file=entrypoint)
     except ArchiveError as error:
         raise PlanError("invalid_artifact", str(error)) from None
 
@@ -109,3 +110,65 @@ def read_prebuilt(directory: Path, *, production=False):
               "build_command": None, "start_command": None, "public_directory": ".", "dockerfile": None,
               "artifact": str(artifact), "upload_files": stats["files"], "upload_bytes": len(data)}
     return report, data
+
+
+def package_image(directory: Path, reference: str, credential_file: Path | str):
+    """Save one local Docker image; never build, pull or push on the user's behalf."""
+    root = directory.resolve()
+    artifact = _artifact(root, "image.tar.gz")
+    if artifact == Path(credential_file).expanduser().resolve():
+        raise PlanError("invalid_artifact", "The output file cannot also be the credential file.")
+    artifact.unlink(missing_ok=True)
+    if not shutil.which("docker"):
+        raise PlanError("missing_docker", "Install Docker with linux/amd64 image save support.")
+    local_directory(root, create=True)
+    out = tempfile.NamedTemporaryFile(dir=artifact.parent, delete=False)
+    pending = Path(out.name)
+    try:
+        with out, subprocess.Popen(["docker", "image", "save", "--platform", "linux/amd64", "--", reference],
+                                   stdin=subprocess.DEVNULL, stdout=subprocess.PIPE) as process:
+            try:
+                size = 0
+                with gzip.GzipFile(filename="", mode="wb", fileobj=out, compresslevel=3, mtime=0) as compressed:
+                    while chunk := process.stdout.read(1024**2):
+                        size += len(chunk)
+                        if size > UNPACK_LIMIT + FILE_LIMIT * 2048 or out.tell() > UPLOAD_LIMIT:
+                            raise PlanError("artifact_too_large", "The Docker image exceeds the 50 MiB compressed / 200 MiB expanded limits.")
+                        compressed.write(chunk)
+                if process.wait():
+                    raise PlanError("image_save_failed", "Could not save a local linux/amd64 image; see Docker output above.")
+            finally:
+                if process.poll() is None:
+                    process.kill()
+        with pending.open("rb") as source:
+            data = source.read(UPLOAD_LIMIT + 1)
+        _inspect(data, entrypoint="manifest.json")
+        pending.replace(artifact)
+    finally:
+        pending.unlink(missing_ok=True)
+    return {"ok": True, "runtime": "image", "artifact": str(artifact), "upload_bytes": len(data)}
+
+
+def read_image(directory: Path, artifact: Path, config: Path | None, credential_file: Path | str, *, production=False):
+    root = directory.resolve()
+    if not root.is_dir():
+        raise PlanError("missing_directory", "Deployment directory does not exist.")
+    if artifact.resolve() == Path(credential_file).expanduser().resolve():
+        raise PlanError("invalid_artifact", "The artifact cannot also be the credential file.")
+    if not artifact.is_file():
+        raise PlanError("missing_artifact", "Choose a regular Docker image archive from poteto build --from-image.")
+    with artifact.open("rb") as source:
+        data = source.read(UPLOAD_LIMIT + 1)
+    stats = _inspect(data, entrypoint="manifest.json")
+    if config is not None and not config.is_file():
+        raise PlanError("missing_config", f"Deployment config does not exist: {config}")
+    config = deployment_config(root, config)
+    if not isinstance(config, dict):
+        raise PlanError("invalid_json", "Deployment config must contain a JSON object.")
+    runtime_fields = ("port", "health_check", "sleep", "memory_mb", "cpus", "database_id", "volume_id", "migration_command")
+    spec = {k: config[k] for k in runtime_fields if k in config}
+    spec |= {"runtime": "image", "target": "production" if production else "preview"}
+    return {"ok": True, "directory": str(root), "origin": "prebuilt-image", "runtime": "image",
+            "target": spec["target"], "build_command": None, "start_command": None, "dockerfile": None,
+            "public_directory": None, "artifact": str(artifact.resolve()), "upload_files": stats["files"],
+            "upload_bytes": len(data), "configuration": spec}, data

@@ -12,7 +12,7 @@ class ProjectInput(Input):
 
 
 class DeploymentInput(Input):
-    runtime: Literal["static", "node", "dockerfile"] = "static"
+    runtime: Literal["static", "node", "dockerfile", "image"] = "static"
     target: Literal["production", "preview"] = "production"
     build_command: str | None = Field(default=None, max_length=2000)
     start_command: str | None = Field(default=None, max_length=2000)
@@ -32,6 +32,9 @@ class DeploymentInput(Input):
     def data_requirements(self):
         if self.runtime == 'static' and (self.database_id or self.volume_id or self.migration_command):
             raise ValueError('Data resources require a dynamic runtime')
+        if self.runtime == 'image' and (self.build_command is not None or self.start_command is not None
+                                       or self.output_directory != '.' or self.dockerfile != 'Dockerfile'):
+            raise ValueError('Prebuilt images use their own entrypoint; source build settings are not supported')
         if self.migration_command and not self.database_id:
             raise ValueError('A migration requires an explicit database_id')
         return self

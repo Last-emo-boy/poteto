@@ -502,8 +502,13 @@ class Dokploy:
             status = client.start_build(deployment['id'], build | {'account_id': account_id, 'project_id': deployment['project_id']}, archive)
         if native_only and status.get('driver') != 'native':
             raise BackendError('Sandbox preview requires a trusted native build')
-        driver = 'Native Docker' if status.get('driver') == 'native' else 'Isolated VM'
-        log(driver + ' build job: ' + deployment['id'])
+        if config['runtime'] == 'image' and not (imported and imported['image_path'] is not None):
+            if status.get('driver') != 'prebuilt':
+                raise BackendError('Executor does not support the requested prebuilt image path')
+            log('Importing prebuilt image: ' + deployment['id'])
+        else:
+            driver = 'Native Docker' if status.get('driver') == 'native' else 'Isolated VM'
+            log(driver + ' build job: ' + deployment['id'])
         output = BuildOutput(client, deployment['id'], log)
         deadline = time.monotonic() + 1250
         while status['state'] in {'queued', 'running'}:
