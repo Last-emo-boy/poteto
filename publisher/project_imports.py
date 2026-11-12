@@ -74,11 +74,14 @@ def lookup(db,store,actor,operation):
 def create(store,actor,project_id,body):
     with store.connection() as db:
         project=store.project(db,actor,project_id,'imports:write',allow_preview=body.target=='preview')
-        if project['preview_mode'] == 'isolated' and body.target!='preview':
-            raise Problem(422, 'Restore production bundles into a managed project, not a stateless personal preview')
+        personal = project['preview_mode'] == 'isolated'
+        if personal and body.target=='production' and not store.settings.personal_production:
+            raise Problem(422, 'Personal production restore is not enabled')
+        if personal and 'volume' in body.kinds:
+            raise Problem(422, 'Personal projects do not support volume resources')
         if body.target=='preview' and (project['preview_mode']!='isolated' or 'volume' in body.kinds):
             raise Problem(422,'Preview restore requires a personal project without volume resources')
-        if body.target=='preview' and (not store.settings.personal_previews or ('database' in body.kinds and not store.settings.native_databases)):
+        if personal and (not store.settings.personal_previews or ('database' in body.kinds and not store.settings.native_databases)):
             raise Problem(503,'The requested preview restore runtime is not enabled')
         for scope in scopes(body.kinds,body.target):store.permit(actor,scope,project_id)
         if project['current_deployment'] or any(store.environment(project,target) for target in ('production','preview')) or db.execute('SELECT 1 FROM deployments WHERE project_id=?',(project_id,)).fetchone() or db.execute('SELECT 1 FROM data_resources WHERE project_id=?',(project_id,)).fetchone():
@@ -94,7 +97,7 @@ def create(store,actor,project_id,body):
         db.execute("INSERT INTO jobs(id,project_id,kind,state,created,updated,preview_access) VALUES(?,?,?,'uploading',?,?,?)",(operation,project_id,'project-import',now,now,body.target=='preview'))
         db.execute('INSERT INTO project_imports(id,bundle_id,kinds,size,expires,destination_target,web_access) VALUES(?,?,?,?,?,?,?)',
                    (operation,body.bundle_id,encode(sorted(set(body.kinds))),body.size,now+TTL,body.target,
-                    bool({'*',PREVIEW_WEB_SCOPE}&set(actor['scopes']))))
+                    bool({'*','deployments:write',PREVIEW_WEB_SCOPE}&set(actor['scopes']))))
         store.audit(db,actor,'project.import',operation)
         return view(lookup(db,store,actor,operation),store)
 
@@ -339,20 +342,23 @@ def allocate(worker,job,row,manifest,account,source_size,expanded):
         if used+source_size+expanded>quota['max_storage']:raise Problem(429,'Artifact storage quota reached')
         config=manifest.configuration.configuration()
         preview=row['destination_target']=='preview'
+        personal=db.execute('SELECT preview_mode FROM projects WHERE id=?',(project,)).fetchone()['preview_mode']=='isolated'
+        if personal and not preview and not store.settings.personal_production:
+            raise BundleError('Personal production restore is not enabled')
         if not preview and config['target']=='preview' and (config.get('database_id') or config.get('volume_id')):
             raise BundleError('A preview with data cannot become the imported production release')
         if preview and (config['target']!='preview' or manifest.project_environment or
                         any(r.stage!='preview' or r.kind!='database' for r in manifest.resources)):
             raise BundleError('Preview restore cannot include production configuration, environment or data')
-        if preview and config.get('outbound_network')=='web' and (not row['web_access'] or not store.settings.sandbox_web):
+        if personal and config.get('outbound_network')=='web' and (not row['web_access'] or not store.settings.sandbox_web):
             raise BundleError('Restoring web access requires explicit web permission and an enabled platform')
         config['target']=row['destination_target']
         driver=ARTIFACT_DRIVER if manifest.static_artifact and store.settings.artifact_enabled(
-            project,config,restored=manifest.built_static,personal=preview) else None
-        if preview and not driver and store.settings.sandbox_enabled(project,config,personal=True):
+            project,config,restored=manifest.built_static,personal=personal) else None
+        if personal and not driver and store.settings.sandbox_enabled(project,config,personal=True):
             driver=SANDBOX_DRIVER
-        if preview and driver is None:
-            raise BundleError('Preview restore requires a supported static artifact or prebuilt image')
+        if personal and driver is None:
+            raise BundleError('Personal restore requires a supported static artifact or prebuilt image')
         if manifest.built_static and driver is None:
             raise BundleError('Enable direct static artifact hosting for the destination before restoring this project')
         mapping={r.id:data.allocate(db,account,project,r.kind,r.stage,import_id=operation) for r in manifest.resources}
@@ -426,7 +432,7 @@ def apply(worker,job,row,project,stage):
         worker.deploy(job,release,imported={
             'image_path':None if manifest.legacy_static or manifest.static_artifact else content/'image.tar',
             'built_path':content/'static.tar.gz' if manifest.built_static else None,
-            'reference':manifest.image,'skip_migration':row['destination_target']=='preview'})
+            'reference':manifest.image,'skip_migration':release['runtime_driver']==SANDBOX_DRIVER})
     with store.connection() as db:
         worker.guard(db)
         if row['destination_target']=='preview':

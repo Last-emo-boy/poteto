@@ -184,6 +184,10 @@ def create_app(settings=None):
                 'image_defaults': {'memory_mb': 256, 'cpus': 0.1, 'sleep': True} if personal else None,
                 'sandbox_pool': settings.sandbox_limits,
                 'preview_environment': bool({'*', 'env:write', PREVIEW_ENV_SCOPE} & set(user['scopes'])),
+                'production': {'enabled': settings.personal_production if personal else True,
+                               'authorized': bool({'*', 'deployments:write'} & set(user['scopes'])),
+                               'environment': bool({'*', 'env:write'} & set(user['scopes'])),
+                               'data': bool({'*', 'databases:write'} & set(user['scopes']))},
                 'preview_database': {'enabled': settings.native_databases and settings.personal_previews if personal else True,
                                      'driver': 'native-postgres' if personal else 'tenant-vm',
                                      'authorized': bool({'*', 'databases:write', PREVIEW_DATA_SCOPE} & set(user['scopes']))},
@@ -419,7 +423,8 @@ def create_app(settings=None):
                 raise Problem(404, "Release does not belong to this project")
             if release["state"] != "ready":
                 raise Problem(409, "Only a healthy ready release can receive production traffic")
-            if release["runtime_driver"] == SANDBOX_DRIVER:
+            if release["runtime_driver"] == SANDBOX_DRIVER and not (
+                    release['preview_mode']=='isolated' and settings.personal_production):
                 raise Problem(409, "The sandbox pilot is preview-only; redeploy to production on the established runtime")
             config=json.loads(release['config'])
             if config['target']=='preview' and (config.get('database_id') or config.get('volume_id')):

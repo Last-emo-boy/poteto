@@ -410,7 +410,7 @@ class Store:
             if config['runtime'] not in {'static', 'image'} or config.get('build_command'):
                 raise Problem(422, 'Build this personal project on your computer or CI with poteto deploy --local-build')
             if config['runtime'] == 'image' and not self.settings.sandbox_enabled(project_id, config, personal=True):
-                raise Problem(422, 'Personal image previews need at least 256 MiB and target preview; only enabled native database bindings are supported')
+                raise Problem(422, 'Personal images need at least 256 MiB and an enabled target; only enabled native database bindings are supported')
         if config['runtime'] == 'image' and not personal and project_id not in self.settings.prebuilt_image_projects:
             raise Problem(403, "Prebuilt image deployment is not enabled for this project")
         account = self.check_concurrency(db, actor)

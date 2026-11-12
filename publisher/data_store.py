@@ -33,8 +33,8 @@ class DataStore:
         with self.store.connection() as db:
             project = self.project(db, actor, project_id, self.scope(kind), stage)
             if project['preview_mode'] == 'isolated':
-                if kind != 'database' or stage != 'preview':
-                    raise Problem(422, 'Personal projects support only preview databases, not volumes or production data')
+                if kind != 'database' or (stage == 'production' and not self.store.settings.personal_production):
+                    raise Problem(422, 'Personal projects require enabled native databases; production data needs personal_production')
                 if not self.store.settings.native_databases or not self.store.settings.personal_previews:
                     raise Problem(503, 'Native preview databases are not enabled on this platform')
             resource_id=self.allocate(db,actor['account_id'],project_id,kind,stage)
@@ -49,7 +49,7 @@ class DataStore:
             raise Problem(404, 'Project not found')
         native = personal['preview_mode'] == 'isolated'
         if native and (not self.store.settings.native_databases or not self.store.settings.personal_previews
-                       or kind != 'database' or stage != 'preview'):
+                       or kind != 'database' or (stage == 'production' and not self.store.settings.personal_production)):
             raise Problem(422, 'This personal project cannot allocate the requested data resource')
         driver = NATIVE_DATABASE_DRIVER if native else None
         if db.execute('SELECT 1 FROM data_resources WHERE project_id=? AND kind=? AND stage=?',(project,kind,stage)).fetchone():

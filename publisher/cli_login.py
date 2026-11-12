@@ -83,7 +83,12 @@ def authorize(client_id, *, timeout=180):
     return {"code": callback["code"], "verifier": verifier, "nonce": nonce}
 
 
-def login(client, output, *, manage_previews=False, manage_env=False, allow_web=False, manage_data=False):
+def login(client, output, *, manage_previews=False, manage_env=False, allow_web=False, manage_data=False,
+          production=False, manage_project=False):
+    if manage_project and not production:
+        raise ValueError('--manage-project requires --production')
+    if production and any((manage_previews, manage_env, allow_web, manage_data)):
+        raise ValueError('Use a separate preview login; --production cannot expand preview-only login options')
     endpoint = urlsplit(client.url)
     if endpoint.scheme != "https" or not endpoint.hostname or endpoint.username is not None or endpoint.path or endpoint.query or endpoint.fragment:
         raise ValueError("IF.Link login requires the HTTPS origin of a Poteto API")
@@ -96,7 +101,7 @@ def login(client, output, *, manage_previews=False, manage_env=False, allow_web=
         raise RuntimeError("This endpoint does not offer Poteto login with IF.Link")
     for selected, capability in [(manage_previews, "preview_management"),
                                   (manage_env, "preview_environment"), (allow_web, "web_egress"),
-                                  (manage_data, "preview_data")]:
+                                  (manage_data, "preview_data"), (production, 'production_publishing')]:
         if selected and not config.get(capability):
             raise RuntimeError("This server does not support the requested login permission: " + capability)
     # Reserve the destination before authenticating or issuing a token.
@@ -104,7 +109,7 @@ def login(client, output, *, manage_previews=False, manage_env=False, allow_web=
         try:
             request = authorize(config["client_id"])
             for selected, name in [(manage_previews, "manage_previews"), (manage_env, "manage_env"), (allow_web, "allow_web"),
-                                   (manage_data, "manage_data")]:
+                                   (manage_data, "manage_data"), (production, 'production'), (manage_project, 'manage_project')]:
                 if selected:
                     request[name] = True
             result = client.request("POST", LOGIN_PATH, request)

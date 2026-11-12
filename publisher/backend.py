@@ -278,7 +278,7 @@ class Dokploy:
                                      cpus=config['cpus'], environment=self.runtime_environment(deployment, port), **wake)
         check()
         self.forward_route(deployment, record)
-        log('Started the preview in gVisor; no tenant runtime VM')
+        log('Started the ' + config['target'] + ' in gVisor; no tenant runtime VM')
 
     def health(self, deployment, timeout=120, check=None):
         deadline = time.monotonic() + timeout
@@ -315,7 +315,8 @@ class Dokploy:
         raise BackendError(f"Release failed its HTTP health check (last status: {last_status}); production traffic was not changed")
 
     def promote(self, deployment):
-        if deployment.get('runtime_driver') == SANDBOX_DRIVER:
+        if deployment.get('runtime_driver') == SANDBOX_DRIVER and not (
+                deployment.get('preview_mode') == 'isolated' and self.settings.personal_production):
             raise BackendError('Sandbox previews cannot receive production traffic')
         if self.target(deployment['id']):
             return self.promote_remote(deployment)

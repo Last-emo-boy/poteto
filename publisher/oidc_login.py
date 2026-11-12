@@ -18,6 +18,9 @@ from publisher.models import Input
 from publisher.store import PREVIEW_DATA_SCOPE, PREVIEW_ENV_SCOPE, PREVIEW_WEB_SCOPE, PREVIEW_MANAGE_SCOPE, PREVIEW_SCOPE, Problem
 
 LOGIN_ISSUE = "token.cli-login"
+PRODUCTION_SCOPES = ['projects:read', 'deployments:read', 'deployments:write']
+PROJECT_MANAGEMENT_SCOPES = ['projects:write', 'env:write', 'databases:write', 'storage:write',
+                             'exports:write', 'imports:write']
 
 
 class LoginExchange(Input):
@@ -28,6 +31,8 @@ class LoginExchange(Input):
     manage_env: bool = Field(default=False, strict=True)
     allow_web: bool = Field(default=False, strict=True)
     manage_data: bool = Field(default=False, strict=True)
+    production: bool = Field(default=False, strict=True)
+    manage_project: bool = Field(default=False, strict=True)
 
 
 def request_id_token(client_id, request):
@@ -81,10 +86,17 @@ class CliLogin:
         def config():
             return {"issuer": ISSUER, "client_id": self.client_id, "preview_management": True,
                     "preview_environment": True, "web_egress": store.settings.sandbox_web,
-                    "preview_data": store.settings.native_databases}
+                    "preview_data": store.settings.native_databases,
+                    "production_publishing": store.settings.personal_production and store.settings.personal_previews}
 
         @app.post(LOGIN_PATH, status_code=201, tags=["Account"])
         def exchange(body: LoginExchange):
+            if body.manage_project and not body.production:
+                raise Problem(422, 'Project management requires explicit production authorization')
+            if body.production and any((body.manage_previews, body.manage_env, body.allow_web, body.manage_data)):
+                raise Problem(422, 'Keep preview-only login options separate from production authorization')
+            if body.production and not (store.settings.personal_production and store.settings.personal_previews):
+                raise Problem(503, 'Personal production publishing is not enabled')
             if not self.in_flight.acquire(blocking=False):
                 raise Problem(429, "Too many login attempts in progress; try again")
             try:
@@ -98,11 +110,13 @@ class CliLogin:
                 if project_id is None:
                     project_id = store.enroll_cli_identity(db, ISSUER, subject)
                 project = db.execute(
-                    "SELECT p.account_id FROM projects p JOIN accounts a ON a.id=p.account_id "
+                    "SELECT p.account_id,p.preview_mode FROM projects p JOIN accounts a ON a.id=p.account_id "
                     "WHERE p.id=? AND p.state='active' AND a.enabled=1", (project_id,),
                 ).fetchone()
                 if project is None:
                     raise Problem(403, "The linked Poteto project is no longer available")
+                if body.production and project['preview_mode'] != 'isolated':
+                    raise Problem(403, 'This linked project requires its existing operator-issued production authorization')
                 scopes = [PREVIEW_SCOPE]
                 for enabled, scope in [(body.manage_previews, PREVIEW_MANAGE_SCOPE),
                                        (body.manage_env, PREVIEW_ENV_SCOPE), (body.allow_web, PREVIEW_WEB_SCOPE),
@@ -113,6 +127,8 @@ class CliLogin:
                     raise Problem(503, "Web egress is not enabled on this platform")
                 if body.manage_data and not store.settings.native_databases:
                     raise Problem(503, "Preview data management is not enabled on this platform")
+                if body.production:
+                    scopes = PRODUCTION_SCOPES + (PROJECT_MANAGEMENT_SCOPES if body.manage_project else [])
                 grant = store.mint_token(db, {"id": None, "account_id": project["account_id"]},
                                          name="Poteto CLI", scopes=scopes, project_ids=[project_id],
                                          expires=time.time() + 7 * 86400, action=LOGIN_ISSUE)
