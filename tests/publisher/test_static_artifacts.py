@@ -24,7 +24,7 @@ class StaticArtifactTests(unittest.TestCase):
         self.actor = self.store.authenticate(self.store.create_account('static')['token'])
         self.project = self.store.create_project(self.actor, 'site')['id']
         self.backend = Dokploy({'routes': str(self.root), 'releases': str(self.root / 'releases'), 'execution_enabled': True,
-                                'ingress_probe': 'private'}, self.store.settings)
+                                'ingress_probe': 'public'}, self.store.settings)
         self.worker = Worker(self.store, self.backend)
 
     def deployment(self, **kwargs):
