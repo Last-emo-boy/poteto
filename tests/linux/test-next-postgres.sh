@@ -11,6 +11,8 @@ network="poteto-next-$nonce"
 database="poteto-db-$nonce"
 app=
 cleanup() {
+    result=$?
+    if [[ "$result" != 0 && -n "$app" ]]; then docker logs --tail 30 "$app"; fi
     [[ -z "$app" ]] || docker rm -f "$app" >/dev/null
     docker rm -f "$database" >/dev/null 2>&1 || true
     docker network rm "$network" >/dev/null 2>&1 || true
@@ -54,14 +56,17 @@ endpoint=$(docker port "$app" 3000/tcp)
 TEST_WRITE_KEY="$write_key" python - "$endpoint" <<'PY'
 import json,os,sys,time
 from urllib.request import Request,urlopen
-from urllib.error import URLError
+from urllib.error import URLError,HTTPError
 base='http://'+sys.argv[1]
 for attempt in range(60):
     try:
         with urlopen(base+'/api/healthz',timeout=2) as response:
             state=json.load(response)
         if state=={'status':'ok','version':'v1','count':0}:break
-    except URLError:pass
+    except HTTPError:
+        raise
+    except (URLError, ConnectionError, TimeoutError):
+        pass  # Docker can accept/reset the port before the Node server has bound it.
     time.sleep(1)
 else:raise RuntimeError('Next.js did not become ready')
 request=Request(base+'/api/notes',b'{"text":"persistent fixture"}',
