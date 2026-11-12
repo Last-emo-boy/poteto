@@ -47,6 +47,7 @@ class SandboxRecoveryTests(unittest.TestCase):
             root=Path(directory);execution=root/'executor';execution.mkdir();(execution/'builds').mkdir()
             for name in ['sandboxes','sandbox-wake','sandbox-retired-ports']:
                 (execution/name).mkdir();(execution/name/'fixture.json').write_text('{}')
+            (execution/'sandbox-resolv.conf').write_text('nameserver 1.1.1.1\n')
             code=root/'code';code.mkdir();(code/'runtime.py').write_text('fixture')
             control=root/'control';control.mkdir()
             for name in ['bin','infra','scripts']:(control/name).mkdir()
@@ -58,6 +59,7 @@ class SandboxRecoveryTests(unittest.TestCase):
                 platform_backup.metadata(stage,request)
             for name in ['sandboxes','sandbox-wake','sandbox-retired-ports']:
                 self.assertTrue((stage/'executor/state'/name/'fixture.json').is_file())
+            self.assertEqual('nameserver 1.1.1.1\n',(stage/'executor/state/sandbox-resolv.conf').read_text())
             self.assertIn('MemoryMax=14G',(stage/'units/paas-sandbox.slice.d/budget.conf').read_text())
             manifest=json.loads((stage/'manifest.json').read_text())
             self.assertEqual(1,manifest['sandbox_count'])

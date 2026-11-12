@@ -133,12 +133,15 @@ def create(name, image, port, host_port, memory, cpu, env, ownership, *, wake=No
         },
         "NetworkingConfig": {"EndpointsConfig": {name: {}}},
     }
+    if dns:
+        body['HostConfig']['Mounts'] = [{'Type':'bind', 'Source':str(sandbox_network.RESOLV),
+                                        'Target':'/etc/resolv.conf', 'ReadOnly':True}]
     if wake:
         body["Healthcheck"] = {"Test": ["CMD", "/poteto-healthcheck", f"http://127.0.0.1:{port}" + wake["health_check"]],
                                "Interval": 2_000_000_000, "Timeout": 3_000_000_000,
                                "StartPeriod": 2_000_000_000, "Retries": 30}
-        body["HostConfig"]["Mounts"] = [{"Type": "bind", "Source": str(sandbox_wake.HEALTHCHECK),
-                                        "Target": "/poteto-healthcheck", "ReadOnly": True}]
+        body["HostConfig"].setdefault("Mounts", []).append({"Type": "bind", "Source": str(sandbox_wake.HEALTHCHECK),
+                                                         "Target": "/poteto-healthcheck", "ReadOnly": True})
     conn = DockerSocket("localhost", timeout=25)
     try:
         conn.request("POST", "/containers/create?name=" + name, json.dumps(body).encode(),
@@ -156,15 +159,21 @@ def observe(container, spec):
     memory, cpu, port, _ = validate(spec)
     if limits["Runtime"] != RUNTIME or not limits["ReadonlyRootfs"] or limits["Privileged"]:
         raise ValueError("Effective sandbox configuration does not match")
-    if spec.get('outbound_network') == 'web' and limits.get('Dns') != spec['dns']:
-        raise ValueError('Sandbox DNS configuration does not match')
+    expected_mounts = {}
+    if spec.get('outbound_network') == 'web':
+        if limits.get('Dns') != spec['dns']:
+            raise ValueError('Sandbox DNS configuration does not match')
+        expected_mounts['/etc/resolv.conf'] = str(sandbox_network.RESOLV)
     if spec.get("sleep"):
-        mounts = container.get("Mounts", [])
+        expected_mounts['/poteto-healthcheck'] = str(sandbox_wake.HEALTHCHECK)
         test = ["CMD", "/poteto-healthcheck", f"http://127.0.0.1:{port}" + spec["health_check"]]
-        if (len(mounts) != 1 or mounts[0].get("Source") != str(sandbox_wake.HEALTHCHECK)
-                or mounts[0].get("Destination") != "/poteto-healthcheck" or mounts[0].get("RW")
-                or container["Config"]["Healthcheck"]["Test"] != test):
+        if container["Config"]["Healthcheck"]["Test"] != test:
             raise ValueError("Sandbox readiness probe is not isolated")
+    mounts = container.get('Mounts', [])
+    if len({mount.get('Destination') for mount in mounts}) != len(expected_mounts) or len(mounts) != len(expected_mounts) or any(
+            mount.get('Type', 'bind') != 'bind' or mount.get('RW')
+            or expected_mounts.get(mount.get('Destination')) != mount.get('Source') for mount in mounts):
+        raise ValueError('Sandbox host mounts do not match its platform-owned files')
     bindings = container["NetworkSettings"]["Ports"].get(f"{port}/tcp", [])
     if bindings != [{"HostIp": "127.0.0.1", "HostPort": str(spec["host_port"])}]:
         raise ValueError("Sandbox ingress is not restricted to host loopback")

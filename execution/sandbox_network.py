@@ -1,11 +1,14 @@
 """Reconcile opt-in web egress without exposing host or private networks."""
 import ipaddress
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
+import tempfile
 
 ROOT = Path('/srv/ovh-paas-execution')
+RESOLV = ROOT / 'sandbox-resolv.conf'
 DNS = ('1.1.1.1', '8.8.8.8')
 PRIVATE = ('0.0.0.0/8', '10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8',
            '169.254.0.0/16', '172.16.0.0/12', '192.0.0.0/24', '192.0.2.0/24',
@@ -82,6 +85,19 @@ def render(root, config, *, exclude=None):
 def configure(root, config, *, exclude=None):
     rules = render(root, config, exclude=exclude)
     subprocess.run(['nft', '-c', '-f', '-'], input=rules, text=True, check=True, timeout=15)
+    if config.get('sandbox_web'):
+        target = root / RESOLV.name
+        content = ''.join('nameserver ' + address + '\n' for address in dns_servers(config))
+        if target.is_symlink():
+            raise ValueError('Sandbox resolver file must not be a link')
+        if not target.exists() or target.read_text() != content:
+            fd, name = tempfile.mkstemp(dir=root)
+            try:
+                with os.fdopen(fd, 'w') as output:
+                    output.write(content); os.fchmod(output.fileno(), 0o644)
+                os.replace(name, target)
+            finally:
+                Path(name).unlink(missing_ok=True)
     subprocess.run(['nft', '-f', '-'], input=rules, text=True, check=True, timeout=15)
 
 

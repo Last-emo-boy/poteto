@@ -63,6 +63,21 @@ class SandboxNetworkTests(unittest.TestCase):
             sandbox.create('app','image',3000,23000,256,.1,{}, {})
             self.assertEqual(['127.0.0.1'],json.loads(socket.request.call_args.args[2])['HostConfig']['Dns'])
 
+    def test_resolver_file_is_direct_read_only_and_preserved_across_reconciliation(self):
+        with patch.object(network.subprocess,'run'):
+            network.configure(self.root,self.config)
+            path=self.root/network.RESOLV.name
+            self.assertEqual('nameserver 1.1.1.1\n',path.read_text())
+            inode=path.stat().st_ino
+            network.configure(self.root,self.config)
+            self.assertEqual(inode,path.stat().st_ino)
+        socket=Mock();socket.getresponse.return_value=Mock(status=201)
+        with patch.object(sandbox,'DockerSocket',return_value=socket):
+            sandbox.create('app','image',3000,23000,256,.1,{}, {},dns=['1.1.1.1'],wake={'health_check':'/healthz'})
+        mounts=json.loads(socket.request.call_args.args[2])['HostConfig']['Mounts']
+        self.assertEqual({'/etc/resolv.conf','/poteto-healthcheck'},{m['Target'] for m in mounts})
+        self.assertTrue(all(m['ReadOnly'] for m in mounts))
+
     def test_executor_rejects_web_without_switch_or_matching_owned_build(self):
         body = {'action':'start','account_id':'b'*24,'project_id':'c'*24,'personal_preview':True,
                 'outbound_network':'web','port':3000,'memory_mb':256,'cpus':.1,'environment':{}}

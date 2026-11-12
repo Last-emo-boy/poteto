@@ -96,7 +96,7 @@ def copy_tree(source,target):
 def metadata(stage,request):
     destination=stage/'executor'
     destination.mkdir(mode=0o700)
-    for name in ['admin.key','admin.key.pub','api.token','config.json','placements.json','known_hosts','resolv.conf','base.img','template.qcow2','wake-proxy-1.tar']:
+    for name in ['admin.key','admin.key.pub','api.token','config.json','placements.json','known_hosts','resolv.conf','sandbox-resolv.conf','base.img','template.qcow2','wake-proxy-1.tar']:
         source=EXECUTION/name
         if source.exists():copy_file(source,destination/'state'/name)
     if (EXECUTION/'retired').is_dir():copy_tree(EXECUTION/'retired',destination/'state/retired')
