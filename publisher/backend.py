@@ -10,6 +10,7 @@ import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from publisher.config import valid_domain
 from publisher.container_logs import capture
 from publisher import static_artifacts
 from publisher.store import ARTIFACT_DRIVER, SANDBOX_DRIVER, Problem
@@ -367,8 +368,14 @@ class Dokploy:
                 if not ca.is_absolute():
                     raise ValueError("The origin CA path must be absolute")
                 context = ssl.create_default_context(cafile=str(ca))
+                domain = self.config.get("origin_probe_domain")
+                if domain is not None:
+                    if not valid_domain(domain):
+                        raise ValueError("Invalid origin probe domain")
+                    host = self.settings.hostname(deployment['project_id'],
+                        None if production else deployment['id'], domain=domain)
             except (KeyError, TypeError, ValueError, OSError):
-                raise BackendError("Origin ingress requires an IP address and readable absolute CA file") from None
+                raise BackendError("Origin ingress requires an IP address, readable absolute CA file and valid optional domain") from None
         path = "/__paas_route_probe__"
         deadline = time.monotonic() + 90
         while time.monotonic() < deadline:

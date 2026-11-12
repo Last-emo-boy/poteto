@@ -56,11 +56,26 @@ class OriginIngressTests(unittest.TestCase):
 
     def test_origin_requires_an_ip_and_a_readable_absolute_ca_file(self):
         for extra in ({'origin_probe_address': 'https://origin.test'},
-                      {'origin_probe_ca': 'relative.pem'}, {'origin_probe_ca': str(self.root / 'missing.pem')}):
+                      {'origin_probe_ca': 'relative.pem'}, {'origin_probe_domain': 'https://invalid.test'}, {'origin_probe_ca': str(self.root / 'missing.pem')}):
             with self.subTest(extra=extra):
                 backend = Dokploy(self.config | extra, Settings(self.root))
                 with self.assertRaisesRegex(BackendError, 'Origin ingress requires'):
                     backend.public_health(self.deployment)
+
+    def test_explicit_origin_alias_preserves_legacy_routing_and_production_selection(self):
+        self.deployment['app_domain'] = 'legacy.test'
+        self.backend.config['origin_probe_domain'] = 'page.example.test'
+        connection = Mock()
+        connection.getresponse.return_value.status = 204
+        connection.getresponse.return_value.getheader.return_value = self.deployment['id']
+        for production in (False, True):
+            with self.subTest(production=production), \
+                 patch('publisher.backend.ssl.create_default_context'), \
+                 patch('publisher.backend.OriginHTTPSConnection', return_value=connection) as connect:
+                self.backend.public_health(self.deployment, production=production)
+                prefix = 'app-' + self.deployment['project_id'] if production else 'preview-' + self.deployment['id']
+                self.assertEqual(prefix + '.page.example.test', connect.call_args.args[0])
+        self.assertEqual('legacy.test', self.deployment['app_domain'])
 
     def start_tls_origin(self):
         key = ec.generate_private_key(ec.SECP256R1())
