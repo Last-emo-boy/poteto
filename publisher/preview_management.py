@@ -24,7 +24,7 @@ def inventory(db, project):
     rows = [dict(r) for r in db.execute("SELECT * FROM deployments WHERE project_id=? ORDER BY created DESC,id DESC", (project,))]
     published = {r[0] for r in db.execute("SELECT deployment_id FROM jobs WHERE project_id=? AND kind IN ('promote','rollback')", (project,))}
     pending = {r['deployment_id']: dict(r) for r in db.execute(
-        "SELECT id,deployment_id,state FROM jobs WHERE project_id=? AND kind='delete' AND state IN ('queued','running')", (project,))}
+        "SELECT id,deployment_id,state FROM jobs WHERE project_id=? AND kind IN ('delete','preview-retention') AND deployment_id IS NOT NULL AND state IN ('queued','running')", (project,))}
     return rows, published, pending
 
 
@@ -162,7 +162,7 @@ def apply(store, actor, project_id, body):
             if db.execute('SELECT 1 FROM uploads WHERE deployment_id=?', (release,)).fetchone():
                 raise Problem(409, 'A selected preview is still uploading')
         for job in db.execute("SELECT kind,deployment_id FROM jobs WHERE project_id=? AND state IN ('uploading','queued','running')", (project_id,)):
-            if job['kind'] != 'delete' or job['deployment_id'] not in body.ids:
+            if job['kind'] not in {'delete','preview-retention'} or job['deployment_id'] not in body.ids:
                 raise Problem(409, 'Project has another active operation; wait before pruning')
         result = []
         for release in body.ids:

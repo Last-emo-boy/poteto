@@ -69,6 +69,8 @@ def create_app(settings=None):
     register_uploads(app, store, actor)
     from publisher.preview_management import register as register_previews
     register_previews(app, store, actor)
+    from publisher.preview_retention import register as register_retention
+    register_retention(app, store, actor)
 
     def release_view(row):
         config = json.loads(row["config"])
@@ -403,7 +405,7 @@ def create_app(settings=None):
                 raise Problem(409, "Promote another release before deleting the production release")
             if db.execute("SELECT 1 FROM uploads WHERE deployment_id=?", (deployment_id,)).fetchone():
                 raise Problem(409, "An upload is still in progress")
-            pending = db.execute("SELECT id FROM jobs WHERE deployment_id=? AND kind='delete' AND state IN ('queued','running')", (deployment_id,)).fetchone()
+            pending = db.execute("SELECT id FROM jobs WHERE deployment_id=? AND kind IN ('delete','preview-retention') AND state IN ('queued','running')", (deployment_id,)).fetchone()
             if pending:
                 return JSONResponse({"job_id": pending["id"], "deployment_id": deployment_id, "state": "deleting"}, status_code=202)
             if row["state"] not in {"ready", "failed", "uploading", "cancelled", "deleting"}:
@@ -459,8 +461,8 @@ def create_app(settings=None):
             if not job:
                 raise Problem(404, "Job not found")
             scope = 'deployments:read'
-            if job['kind'] == 'delete' and PREVIEW_SCOPE in user['scopes']:
-                if not db.execute("SELECT 1 FROM audit WHERE account_id=? AND action IN ('preview.prune','preview.delete') AND object_id=?",
+            if job['kind'] in {'delete','preview-retention'} and PREVIEW_SCOPE in user['scopes']:
+                if not db.execute("SELECT 1 FROM audit WHERE account_id=? AND action IN ('preview.prune','preview.delete','preview.retention') AND object_id=?",
                                   (user['account_id'], job_id)).fetchone():
                     raise Problem(404, 'Preview cleanup job not found')
                 scope = PREVIEW_MANAGE_SCOPE

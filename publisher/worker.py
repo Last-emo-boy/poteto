@@ -86,6 +86,8 @@ class Worker:
             expire(self.store)
             from publisher.project_imports import expire as expire_imports
             expire_imports(self.store)
+            from publisher.preview_retention import enqueue_due
+            enqueue_due(self.store)
             self.last_maintenance = time.monotonic()
         job = self.store.claim(self.owner, logs_only=self.logs_only,
                                static_previews_only=self.static_previews_only)
@@ -103,6 +105,12 @@ class Worker:
             self.check()
             if job["attempts"] > 3:
                 raise BackendError("Operation recovery limit exceeded; inspect logs before retrying")
+            if job['kind'] == 'preview-retention':
+                from publisher.preview_retention import begin
+                deployment = begin(self, job, deployment)
+                if deployment is None:
+                    self.finish(job)
+                    return True
             if job['kind']=='runtime-logs':
                 text=self.redact(deployment,self.backend.runtime_logs(deployment))
                 text=text.encode()[-65536:].decode(errors='replace')
@@ -138,7 +146,7 @@ class Worker:
                 self.backend.promote(deployment)
                 self.commit_production(deployment)
                 self.log(deployment, job["kind"] + " completed")
-            elif job['kind'] == 'delete':
+            elif job['kind'] in {'delete','preview-retention'}:
                 self.backend.remove(deployment)
                 self.check()
                 (self.store.settings.root / 'artifacts' / (deployment['id'] + '.tar.gz')).unlink(missing_ok=True)
@@ -200,7 +208,7 @@ class Worker:
             self.log(deployment, message)
             if job["kind"] == "deploy":
                 self.state(deployment["id"], "failed", error=message)
-            elif job['kind'] == 'delete':
+            elif job['kind'] in {'delete','preview-retention'} and deployment is not None:
                 self.state(deployment['id'], 'deleting', error=message)
             elif job['kind']=='project-import':
                 from publisher.project_imports import fail_release
@@ -266,6 +274,7 @@ class Worker:
             purge_project(db,self.store,project_id)
             from publisher.project_imports import purge_project as purge_imports
             purge_imports(db,self.store,project_id)
+            db.execute('DELETE FROM preview_retention WHERE project_id=?', (project_id,))
             # Keep only ownership for durable job receipts. Release the public
             # name/quota and erase mutable project secrets after actual cleanup.
             db.execute("UPDATE projects SET state='deleted',name=?,environment=?,preview_environment=NULL,current_deployment=NULL WHERE id=?",('~deleted:'+project_id,self.store.seal({}),project_id))

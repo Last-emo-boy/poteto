@@ -113,6 +113,21 @@ Both `--yes` and `--ids` are required. The server rechecks every selected ID bef
 
 Ordinary Agent preview tokens remain deployment-only. Personal users can explicitly request preview cleanup during IF.Link login with `poteto login --manage-previews` (log out first, or choose a separate `--output` file). This grants `previews:manage` only for the bound project, not production, environment variables, token issuance or database/volume deletion. Existing management credentials with `deployments:write` also work. For manual tokens, add `--project PROJECT_ID` to these commands.
 
+### Automatically retire old stateless previews
+
+Retention is off for every project until its owner enables it. Inspect the proposed policy first:
+
+```sh
+poteto retention status --project PROJECT_ID
+poteto retention set --project PROJECT_ID --older-than-days 7 --keep 3
+poteto retention set --project PROJECT_ID --older-than-days 7 --keep 3 --yes
+poteto retention disable --project PROJECT_ID
+```
+
+Without `--yes`, `set` is a read-only preview. Enabling requires both `projects:write` and `deployments:write`, available through an explicitly authorized project-management or workspace login; Agent deployment tokens and preview-cleanup tokens cannot change this persistent policy. The main worker checks enabled projects every minute and removes at most one eligible preview per project per interval, using the same production, rollback-history and data-binding protections as `prune`. Keep at least one ready preview; active uploads and projects with pending operations are left alone. Busy projects are reconsidered later.
+
+These removals permanently delete the selected preview's runtime and artifact; there is no recovery bin. Persistent databases and volumes are never included. `status --json` shows the current candidates and recent job results. Disabling or tightening a policy takes effect before a queued job selects its release. A deletion already begun finishes through the existing crash-recovery path. Failed deletion remains visible and requires an explicit `prune --yes --ids ...` retry; the scheduler does not loop over it. Policies remain project settings after the enabling login expires. Project bundles do not copy retention settings; a new destination keeps its default disabled policy.
+
 ## Runtime variables and redeploys
 
 ```sh

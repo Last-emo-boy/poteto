@@ -9,7 +9,7 @@ description: 用 Poteto CLI 把现有应用目录预检并发布到 Poteto 的 H
 
 ## 安装与凭据
 
-如果没有可用的 Poteto 0.18.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
+如果没有可用的 Poteto 0.19.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
 
 ```sh
 curl -fsSL https://poteto.iflink.tech/install.sh | sh
@@ -69,6 +69,8 @@ Next.js / Vite 项目可在预检和部署时同时加 `--preset nextjs` / `--pr
 `poteto usage --project "$PROJECT_ID" --json` 返回实际用于准入的空间、运行资源和并发额度预留，以及当前凭据可见的项目版本；不是实时 CPU/RSS，休眠仍保留唤醒额度。空间或资源不足时先据此定位，不重复创建部署。
 
 `poteto prune --project "$PROJECT_ID" --json` 只预览清理候选，默认保留最新三个就绪预览和最近七天的版本；生产、曾用于发布/回滚的版本、绑定数据库或卷的预览不会入选。删除须取得用户对具体 ID 的授权，再用同一筛选条件执行 `poteto prune --project "$PROJECT_ID" --yes --ids ID1 ID2 --json`。中断后重复原 ID 列表，不扩大选择。部署专用 token 没有清理权限；不要擅自扩权或替用户启用 `login --manage-previews`，应由用户使用管理凭据执行。
+
+`poteto retention status --project "$PROJECT_ID" --json` 可检查自动保留策略和最近任务。默认关闭；`retention set --older-than-days 7 --keep 3` 也只是预检。只有用户明确授权持续清理该项目的过期预览时，才可用项目管理凭据加 `--yes` 保存；一次性删除几个 ID 的授权不能用来启用自动策略。策略保留至少一个就绪预览，沿用生产、回滚历史、数据绑定保护。删除不可恢复；失败任务应检查后按原 ID 手动重试。`retention disable` 阻止尚未开始的清理，已开始的删除会安全完成。
 
 新个人项目若显示 `preview_mode: "isolated"`，只接收本地构建的静态成品或预览镜像，不会退回服务器源码编译或租户 VM。镜像默认 256 MiB、0.1 vCPU、自动休眠；以远端预检的 `configuration` 为准，保留用户显式配置。数据库能力以 `capabilities.preview_database` 和远端预检为准；不支持持久卷，不要为进入通道删除真实需求。出站网络默认关闭；外部 API 需求按下节检查，PostgreSQL 需求按下节处理，持久卷沿用已支持的托管项目。
 

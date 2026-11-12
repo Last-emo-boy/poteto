@@ -81,6 +81,28 @@ class UsageCliTests(unittest.TestCase):
                 browser.assert_not_called()
 
 
+    def test_retention_set_is_a_dry_run_without_explicit_confirmation(self):
+        client=Mock();client.request.side_effect=[{'can_manage':True},{'candidates':[{'id':R}]}]
+        out,_=self.command(client,'retention','set','--project',P,'--keep','2','--older-than-days','14','--json')
+        result=json.loads(out);self.assertTrue(result['dry_run']);self.assertEqual(2,result['policy']['keep'])
+        self.assertEqual(['GET','GET'],[call.args[0] for call in client.request.call_args_list])
+        self.assertEqual(f'/v1/projects/{P}/previews/prune?keep=2&older_than_days=14',client.request.call_args.args[1])
+        for flags in [('--keep','0'),('--older-than-days','0'),('--older-than-days','3651')]:
+            client.reset_mock();self.command(client,'retention','set','--project',P,*flags,status=2)
+            client.request.assert_not_called()
+
+    def test_retention_confirmation_and_disable_use_the_selected_project(self):
+        result={'enabled':True,'policy':{'keep':3,'older_than_days':7},'plan':{'candidates':[]},'recent_jobs':[]}
+        client=Mock();client.request.return_value=result
+        out,_=self.command(client,'retention','set','--project',P,'--yes','--json')
+        client.request.assert_called_once_with('PUT',f'/v1/projects/{P}/previews/retention',{'older_than_days':7,'keep':3})
+        self.assertEqual(result,json.loads(out));client.reset_mock()
+        self.command(client,'retention','disable','--project',P,'--json')
+        client.request.assert_called_once_with('DELETE',f'/v1/projects/{P}/previews/retention')
+        client.reset_mock();self.command(client,'retention','status','--project',P)
+        client.request.assert_called_once_with('GET',f'/v1/projects/{P}/previews/retention')
+
+
 class PreviewLoginOptionTests(unittest.TestCase):
     def test_explicit_options_are_sent_only_after_capability_check(self):
         with tempfile.TemporaryDirectory() as directory:

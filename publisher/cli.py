@@ -343,6 +343,16 @@ def main(prog="poteto"):
     prune.add_argument("--json", action="store_true")
     prune.add_argument("--no-wait", action="store_true")
     prune.add_argument("--timeout", type=int, default=900)
+    retention = commands.add_parser('retention', help='Inspect or explicitly enable automatic stateless preview cleanup')
+    retention_actions = retention.add_subparsers(dest='retention_action', required=True)
+    for action in ('status', 'set', 'disable'):
+        entry = retention_actions.add_parser(action)
+        entry.add_argument('--project')
+        entry.add_argument('--json', action='store_true')
+        if action == 'set':
+            entry.add_argument('--older-than-days', type=int, default=7)
+            entry.add_argument('--keep', type=int, default=3)
+            entry.add_argument('--yes', action='store_true', help='Authorize this ongoing automatic deletion policy')
     tokens = commands.add_parser("token")
     token_actions = tokens.add_subparsers(dest="token_action", required=True)
     for action in ('create-preview', 'create-production'):
@@ -455,6 +465,9 @@ def main(prog="poteto"):
         if args.ids and (len(args.ids) > 100 or len(set(args.ids)) != len(args.ids)
                          or any(not re.fullmatch(r'[a-f0-9]{24}', value) for value in args.ids)):
             parser.error("Use distinct 24-character deployment IDs, at most 100")
+    if args.command == 'retention' and args.retention_action == 'set':
+        if not 1 <= args.keep <= 100 or not 1 <= args.older_than_days <= 3650:
+            parser.error('Automatic retention requires --keep 1..100 and --older-than-days 1..3650')
     if getattr(args, "resume", None) and any((args.local_build, args.prebuilt, args.prebuilt_image,
                                                args.preset, args.config, args.prod, args.preview)):
         parser.error("--resume reuses the saved artifact and target; omit build, configuration and target flags")
@@ -582,6 +595,9 @@ def main(prog="poteto"):
                 return
         elif args.command == 'prune':
             cli_usage.prune(client, args)
+            return
+        elif args.command == 'retention':
+            cli_usage.retention(client, args)
             return
         elif args.command == "link":
             if not args.project:

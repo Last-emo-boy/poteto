@@ -67,6 +67,12 @@ CREATE TABLE IF NOT EXISTS jobs (
  deployment_id TEXT REFERENCES deployments(id), state TEXT NOT NULL DEFAULT 'queued',
  owner TEXT, lease_until REAL, attempts INTEGER NOT NULL DEFAULT 0,
  error TEXT, created REAL NOT NULL, updated REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS preview_retention (
+ project_id TEXT PRIMARY KEY REFERENCES projects(id), enabled INTEGER NOT NULL DEFAULT 0,
+ older_than_days INTEGER NOT NULL, keep INTEGER NOT NULL,
+ updated REAL NOT NULL, checked_at REAL NOT NULL DEFAULT 0);
+CREATE TABLE IF NOT EXISTS preview_retention_runs (
+ job_id TEXT PRIMARY KEY REFERENCES jobs(id), deployment_id TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS data_resources (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
  kind TEXT NOT NULL, stage TEXT NOT NULL, state TEXT NOT NULL,

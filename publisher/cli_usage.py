@@ -79,3 +79,35 @@ def prune(client, args):
     else:
         for row in result['releases']:
             print(f"{row['id']}  {row['state']}" + (f"  job={row['job_id']}" if row['job_id'] else ''))
+
+
+def retention(client, args):
+    base = f'/v1/projects/{args.project}/previews/retention'
+    action = args.retention_action
+    if action == 'set':
+        policy = {'older_than_days': args.older_than_days, 'keep': args.keep}
+        if args.yes:
+            result = client.request('PUT', base, policy)
+        else:
+            current = client.request('GET', base)
+            planned = client.request('GET', f'/v1/projects/{args.project}/previews/prune?keep={args.keep}&older_than_days={args.older_than_days}')
+            result = {'project_id': args.project, 'dry_run': True, 'policy': policy,
+                      'can_manage': current['can_manage'], 'plan': planned}
+    else:
+        result = client.request('DELETE' if action == 'disable' else 'GET', base)
+    if args.json:
+        print(json.dumps(result, indent=2))
+        return
+    policy = result['policy']
+    state = 'Dry run' if result.get('dry_run') else 'Enabled' if result['enabled'] else 'Disabled'
+    print(f"{state}: retain the latest {policy['keep']} ready previews and remove eligible previews older than {policy['older_than_days']} days.")
+    print('Production, published history and data-bound previews are protected. Removal is permanent.')
+    print(f"Eligible now: {len(result['plan']['candidates'])}. At most one preview per project is removed each minute.")
+    if result.get('dry_run'):
+        if not result['can_manage']:
+            print('Enabling retention requires a project-management credential, not a deployment or preview-cleanup token.')
+        print(f"To authorize ongoing cleanup: poteto retention set --project {args.project} --keep {policy['keep']} --older-than-days {policy['older_than_days']} --yes")
+    else:
+        print('Disabling prevents queued work from starting a deletion; already begun cleanup finishes safely.')
+        for job in result['recent_jobs']:
+            print(f"{job['id']}  {job['state']}" + (f"  {job['error']}" if job['error'] else ''))
