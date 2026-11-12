@@ -83,7 +83,7 @@ class DataTests(unittest.TestCase):
         resource_id=self.resource()['id']
         with self.store.connection() as db:
             resource=dict(db.execute('SELECT * FROM data_resources WHERE id=?',(resource_id,)).fetchone())
-        backend=Mock();backend.store=self.store
+        backend=Mock();backend.store=self.store;backend.create_compose.return_value='compose'
         registry=Mock();registry.ensure.return_value={'server_id':'server'}
         with patch('publisher.data_backend.RuntimeRegistry',return_value=registry), \
              patch.object(DataBackend,'request',side_effect=[{}, {'container':None}, {'ready':True}]):
