@@ -297,6 +297,7 @@ def main(prog="poteto"):
     sign_in.add_argument("--manage-previews", action="store_true", help="Explicitly authorize cleanup of your unpublished previews, never production or persistent data")
     sign_in.add_argument("--manage-env", action="store_true", help="Allow managing preview environment variables, never production values")
     sign_in.add_argument("--allow-web", action="store_true", help="Allow previews to opt into public HTTP/HTTPS access; private networks remain blocked")
+    sign_in.add_argument("--manage-data", action="store_true", help="Allow managing preview databases, never production data")
     sign_out = commands.add_parser("logout", help="Revoke the credential issued by IF.Link login")
     sign_out.add_argument("--file", type=Path, default=default_token_file())
     init = commands.add_parser("init", help="Start a static, Node or Dockerfile preview project")
@@ -492,7 +493,7 @@ def main(prog="poteto"):
         args.url = explicit_url or (linked.url if linked else DEFAULT_URL)
         if args.command == "login":
             print(json.dumps(login(Client(args.url), args.output, manage_previews=args.manage_previews,
-                                   manage_env=args.manage_env, allow_web=args.allow_web), indent=2, ensure_ascii=False))
+                                   manage_env=args.manage_env, allow_web=args.allow_web, manage_data=args.manage_data), indent=2, ensure_ascii=False))
             return
         if args.command == "logout":
             print(json.dumps(logout(Client, args.url, args.file), indent=2))

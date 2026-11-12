@@ -1,6 +1,7 @@
 from fastapi import Depends
 from publisher.data_store import DataStore
 from publisher.models import DataInput
+from publisher.store import PREVIEW_SCOPE
 
 
 def register(app, store, actor):
@@ -17,9 +18,9 @@ def register(app, store, actor):
     @app.get('/v1/projects/{project_id}/data',tags=['Data'])
     def list_data(project_id: str, user=Depends(actor)):
         with store.connection() as db:
-            store.project(db,user,project_id,'projects:read')
+            data.project(db,user,project_id,'projects:read')
             rows=db.execute('SELECT * FROM data_resources WHERE project_id=? ORDER BY created',(project_id,)).fetchall()
-            return [data.view(r) for r in rows]
+            return [data.view(r) for r in rows if PREVIEW_SCOPE not in user['scopes'] or r['stage']=='preview']
 
     @app.get('/v1/data/{resource_id}',tags=['Data'])
     def get_data(resource_id: str, user=Depends(actor)):

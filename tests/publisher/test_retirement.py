@@ -70,6 +70,13 @@ class ExecutorRetirementTests(unittest.TestCase):
             service.assert_not_called()
             self.assertEqual(b'test-tenant',self.disk.read_bytes())
 
+    def test_native_database_keeps_its_account_from_retiring(self):
+        path = self.root/'native-databases'/('c'*24);path.mkdir(parents=True)
+        (path/'database.json').write_text(json.dumps({'resource_id':'c'*24,'account_id':A}))
+        with patch.object(host,'systemctl') as service, self.assertRaisesRegex(host.ExecutionError,'owns a database'):
+            host.retire_runtime(A,'prepare')
+        service.assert_not_called();self.assertTrue(self.disk.is_file())
+
     def test_interrupted_stop_keeps_placement_then_slot_can_be_reused(self):
         with patch.object(host,'runtime',return_value=placement(A,0)),patch.object(host,'confirm_empty_runtime'):
             self.assertEqual('prepared',host.retire_runtime(A,'prepare')['state'])

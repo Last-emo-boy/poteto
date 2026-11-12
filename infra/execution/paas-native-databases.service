@@ -1,0 +1,18 @@
+[Unit]
+Description=Recover bounded Poteto PostgreSQL databases before applications
+After=docker.service paas-sandbox-network.service
+Requires=docker.service paas-sandbox-network.service
+Before=paas-sandbox-wake.service
+PartOf=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/paas-execution
+ExecStart=/usr/bin/python3 -m execution.native_database recover
+ExecStop=/usr/bin/python3 -m execution.native_database stop
+TimeoutStartSec=1800
+TimeoutStopSec=1800
+
+[Install]
+WantedBy=multi-user.target

@@ -14,7 +14,7 @@ from publisher.archive import ArchiveError, unpack
 from publisher.config import Settings
 from publisher.http_limits import ControlLimits
 from publisher.models import PreflightInput, DeploymentInput, EnvironmentInput, EnvironmentPatchInput, ProjectInput, ReleaseInput, TokenInput
-from publisher.store import PREVIEW_ENV_SCOPE, PREVIEW_WEB_SCOPE, PREVIEW_SCOPES, PREVIEW_MANAGE_SCOPE, PREVIEW_SCOPE, SANDBOX_DRIVER, Problem, SCOPES, Store, encode, ident
+from publisher.store import PREVIEW_DATA_SCOPE, PREVIEW_ENV_SCOPE, PREVIEW_WEB_SCOPE, PREVIEW_SCOPES, PREVIEW_MANAGE_SCOPE, PREVIEW_SCOPE, SANDBOX_DRIVER, Problem, SCOPES, Store, encode, ident
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -184,10 +184,13 @@ def create_app(settings=None):
                 'image_defaults': {'memory_mb': 256, 'cpus': 0.1, 'sleep': True} if personal else None,
                 'sandbox_pool': settings.sandbox_limits,
                 'preview_environment': bool({'*', 'env:write', PREVIEW_ENV_SCOPE} & set(user['scopes'])),
+                'preview_database': {'enabled': settings.native_databases and settings.personal_previews if personal else True,
+                                     'driver': 'native-postgres' if personal else 'tenant-vm',
+                                     'authorized': bool({'*', 'databases:write', PREVIEW_DATA_SCOPE} & set(user['scopes']))},
                 'web_egress': {'enabled': settings.sandbox_web,
                                'authorized': bool({'*', 'deployments:write', PREVIEW_WEB_SCOPE} & set(user['scopes'])),
                                'ports': [80, 443], 'private_networks': False},
-                'limitations': ['Outbound network requires explicit web permission', 'No database or volume binding', 'Image previews only; no VM fallback'] if personal else []}
+                'limitations': ['Outbound network requires explicit web permission', 'No volume binding or migration command', 'Image previews only; no VM fallback'] if personal else []}
 
     @app.patch('/v1/projects/{project_id}',tags=['Projects'])
     def rename_project(project_id: str,body: ProjectInput,user=Depends(actor)):
@@ -443,6 +446,10 @@ def create_app(settings=None):
             if job['kind'].startswith(('database-', 'volume-')):
                 from publisher.data_store import DataStore
                 scope = DataStore.scope(job['kind'].split('-')[0])
+                if PREVIEW_SCOPE in user['scopes']:
+                    if not job['preview_access']:
+                        raise Problem(404, 'Preview data job not found')
+                    scope = PREVIEW_DATA_SCOPE
             store.project(db, user, job["project_id"], scope,allow_inactive=True)
         return {k: job[k] for k in ("id", "kind", "deployment_id", "resource_id", "state", "error", "created", "updated")}
 

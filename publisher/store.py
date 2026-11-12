@@ -27,10 +27,12 @@ PREVIEW_SCOPE = "deployments:preview"
 PREVIEW_MANAGE_SCOPE = "previews:manage"
 PREVIEW_ENV_SCOPE = "previews:env"
 PREVIEW_WEB_SCOPE = "previews:web"
-PREVIEW_SCOPES = {PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE, PREVIEW_ENV_SCOPE, PREVIEW_WEB_SCOPE}
+PREVIEW_DATA_SCOPE = "previews:data"
+PREVIEW_SCOPES = {PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE, PREVIEW_ENV_SCOPE, PREVIEW_WEB_SCOPE, PREVIEW_DATA_SCOPE}
 ARTIFACT_DRIVER = "static-artifact"
 SANDBOX_DRIVER = "gvisor"
-SCOPES = {"projects:read", "projects:write", "deployments:read", "deployments:write", "env:write", "databases:write", "storage:write", "tokens:write", "exports:write", "imports:write", PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE, PREVIEW_ENV_SCOPE, PREVIEW_WEB_SCOPE}
+NATIVE_DATABASE_DRIVER = "native-postgres"
+SCOPES = {"projects:read", "projects:write", "deployments:read", "deployments:write", "env:write", "databases:write", "storage:write", "tokens:write", "exports:write", "imports:write"} | PREVIEW_SCOPES
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
  id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
@@ -124,6 +126,10 @@ class Store:
         with self.connection() as db:
             if 'resource_id' not in {r['name'] for r in db.execute('PRAGMA table_info(jobs)')}:
                 db.execute('ALTER TABLE jobs ADD COLUMN resource_id TEXT REFERENCES data_resources(id)')
+            if 'preview_access' not in {r['name'] for r in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute('ALTER TABLE jobs ADD COLUMN preview_access INTEGER NOT NULL DEFAULT 0')
+            if 'runtime_driver' not in {r['name'] for r in db.execute('PRAGMA table_info(data_resources)')}:
+                db.execute('ALTER TABLE data_resources ADD COLUMN runtime_driver TEXT')
             if 'state' not in {r['name'] for r in db.execute('PRAGMA table_info(projects)')}:
                 db.execute("ALTER TABLE projects ADD COLUMN state TEXT NOT NULL DEFAULT 'active'")
             if 'preview_environment' not in {r['name'] for r in db.execute('PRAGMA table_info(projects)')}:
@@ -377,7 +383,7 @@ class Store:
         total, sandbox = totals["platform"], totals["sandbox"]
         account = totals["accounts"].get(account_id, capacity.empty())
         # Match the sandbox slice envelope, rather than over-reserving its parent limits.
-        if driver == SANDBOX_DRIVER and (sandbox["memory_mib"] + config['memory_mb'] > self.settings.sandbox_limits["memory_mib"]
+        if driver in {SANDBOX_DRIVER, NATIVE_DATABASE_DRIVER} and (sandbox["memory_mib"] + config['memory_mb'] > self.settings.sandbox_limits["memory_mib"]
                                          or sandbox["vcpus"] + config['cpus'] > self.settings.sandbox_limits["vcpus"]):
             raise Problem(429, "Sandbox preview pool capacity is reserved; remove an unused sandbox preview")
         if account["memory_mib"] + config["memory_mb"] > capacity.ACCOUNT["memory_mib"]:
@@ -396,7 +402,7 @@ class Store:
             if config['runtime'] not in {'static', 'image'} or config.get('build_command'):
                 raise Problem(422, 'Build this personal project on your computer or CI with poteto deploy --local-build')
             if config['runtime'] == 'image' and not self.settings.sandbox_enabled(project_id, config, personal=True):
-                raise Problem(422, 'Personal image previews need at least 256 MiB, no persistent data bindings and target preview; use a managed project for other workloads')
+                raise Problem(422, 'Personal image previews need at least 256 MiB and target preview; only enabled native database bindings are supported')
         if config['runtime'] == 'image' and not personal and project_id not in self.settings.prebuilt_image_projects:
             raise Problem(403, "Prebuilt image deployment is not enabled for this project")
         account = self.check_concurrency(db, actor)

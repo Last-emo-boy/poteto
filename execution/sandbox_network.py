@@ -56,6 +56,19 @@ def render(root, config, *, exclude=None):
             if bridge in bridges:
                 raise ValueError('Sandbox bridge has multiple egress owners')
             bridges.add(bridge)
+    database_bridges = []
+    for path in (root / 'native-databases').glob('*/database.json'):
+        value = json.loads(path.read_text())
+        if (not re.fullmatch(r'[a-f0-9]{24}', path.parent.name)
+                or value.get('resource_id') != path.parent.name
+                or type(value.get('slot')) is not int or not 25000 <= value['slot'] <= 25063):
+            raise ValueError('Invalid native database network receipt')
+        if value.get('phase') != 'deleting':
+            database_bridges.append('ptdb' + str(value['slot']))
+    if len(database_bridges) != len(set(database_bridges)):
+        raise ValueError('A native database bridge has multiple owners')
+    database_rules = ''.join(f'   iifname "{bridge}" oifname "{bridge}" accept\n'
+                             for bridge in sorted(database_bridges))
     elements = ', '.join('"' + value + '"' for value in sorted(bridges))
     members = 'elements = { ' + elements + ' };' if elements else ''
     return f'''destroy table inet poteto_sandbox
@@ -67,9 +80,13 @@ def render(root, config, *, exclude=None):
    type filter hook input priority -20; policy accept;
    iifname "psbx*" ct state established,related accept
    iifname "psbx*" counter reject
+   iifname "ptdb*" ct state established,related accept
+   iifname "ptdb*" counter reject
   }}
   chain forward {{
    type filter hook forward priority -20; policy accept;
+{database_rules}   iifname "ptdb*" counter drop
+   oifname "ptdb*" counter drop
    iifname @web_bridges ip daddr @denied_ipv4 counter reject
    iifname @web_bridges ip daddr @dns_servers udp dport 53 accept
    iifname @web_bridges ip daddr @dns_servers tcp dport 53 accept

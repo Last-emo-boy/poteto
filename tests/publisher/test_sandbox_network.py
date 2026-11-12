@@ -91,3 +91,14 @@ class SandboxNetworkTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError,'owned build receipt'):
                 sandbox.operation(self.root,config,self.release,body,status)
             docker.assert_not_called()
+
+    def test_database_networks_allow_only_same_project_bridges(self):
+        for index in range(2):
+            directory=self.root/'native-databases'/((str(index+1))*24);directory.mkdir(parents=True)
+            (directory/'database.json').write_text(json.dumps({'resource_id':directory.name,'slot':25000+index,'phase':'ready'}))
+        rules=network.render(self.root,self.config)
+        self.assertIn('iifname "ptdb25000" oifname "ptdb25000" accept',rules)
+        self.assertIn('iifname "ptdb25001" oifname "ptdb25001" accept',rules)
+        self.assertNotIn('iifname "ptdb25000" oifname "ptdb25001" accept',rules)
+        self.assertIn('iifname "ptdb*" counter reject',rules)
+        self.assertIn('iifname "ptdb*" counter drop',rules)

@@ -2,7 +2,7 @@
 import json
 import secrets
 import time
-from publisher.store import Problem, ident
+from publisher.store import NATIVE_DATABASE_DRIVER, PREVIEW_DATA_SCOPE, PREVIEW_SCOPE, Problem, ident
 
 
 class DataStore:
@@ -13,34 +13,54 @@ class DataStore:
     def scope(kind):
         return 'databases:write' if kind == 'database' else 'storage:write'
 
+    def project(self, db, actor, project_id, scope, stage=None):
+        preview = PREVIEW_SCOPE in actor['scopes']
+        project = self.store.project(db, actor, project_id, scope, allow_preview=preview)
+        if preview:
+            self.store.permit(actor, PREVIEW_DATA_SCOPE, project_id)
+            if stage is not None and stage != 'preview':
+                raise Problem(404, 'Preview data resource not found')
+        return project
+
     def resource(self, db, actor, resource_id, kind=None, scope=None):
         row = db.execute('SELECT * FROM data_resources WHERE id=?', (resource_id,)).fetchone()
         if not row or (kind and row['kind'] != kind):
             raise Problem(404, 'Data resource not found')
-        self.store.project(db, actor, row['project_id'], scope or self.scope(row['kind']))
+        self.project(db, actor, row['project_id'], scope or self.scope(row['kind']), row['stage'])
         return dict(row)
 
     def create(self, actor, project_id, kind, stage):
         with self.store.connection() as db:
-            project = self.store.project(db, actor, project_id, self.scope(kind))
+            project = self.project(db, actor, project_id, self.scope(kind), stage)
             if project['preview_mode'] == 'isolated':
-                raise Problem(422, 'Personal preview projects are stateless; use a managed project for databases and volumes')
+                if kind != 'database' or stage != 'preview':
+                    raise Problem(422, 'Personal projects support only preview databases, not volumes or production data')
+                if not self.store.settings.native_databases or not self.store.settings.personal_previews:
+                    raise Problem(503, 'Native preview databases are not enabled on this platform')
             resource_id=self.allocate(db,actor['account_id'],project_id,kind,stage)
             job_id,now=ident(),time.time()
-            db.execute('INSERT INTO jobs(id,project_id,kind,resource_id,created,updated) VALUES(?,?,?,?,?,?)',(job_id,project_id,kind+'-create',resource_id,now,now))
+            db.execute('INSERT INTO jobs(id,project_id,kind,resource_id,created,updated,preview_access) VALUES(?,?,?,?,?,?,?)',(job_id,project_id,kind+'-create',resource_id,now,now,stage=='preview'))
             self.store.audit(db,actor,kind+'.create',resource_id)
         return {'id':resource_id,'project_id':project_id,'kind':kind,'stage':stage,'state':'queued','job_id':job_id}
 
     def allocate(self,db,account,project,kind,stage,*,import_id=None):
+        personal = db.execute('SELECT preview_mode FROM projects WHERE id=? AND account_id=?',(project,account)).fetchone()
+        if personal is None:
+            raise Problem(404, 'Project not found')
+        native = personal['preview_mode'] == 'isolated'
+        if native and (not self.store.settings.native_databases or not self.store.settings.personal_previews
+                       or kind != 'database' or stage != 'preview'):
+            raise Problem(422, 'This personal project cannot allocate the requested data resource')
+        driver = NATIVE_DATABASE_DRIVER if native else None
         if db.execute('SELECT 1 FROM data_resources WHERE project_id=? AND kind=? AND stage=?',(project,kind,stage)).fetchone():
             raise Problem(409,'This project already has that data resource; inspect or retry it')
         count=db.execute('SELECT count(*) FROM data_resources r JOIN projects p ON r.project_id=p.id WHERE p.account_id=? AND r.kind=?',(account,kind)).fetchone()[0]
         if count>=(2 if kind=='database' else 3):raise Problem(429,'Account data resource quota reached')
-        if kind=='database':self.store.check_runtime_capacity(db,account,{'memory_mb':256,'cpus':0.25})
+        if kind=='database':self.store.check_runtime_capacity(db,account,{'memory_mb':256,'cpus':0.25},driver=driver)
         resource,now=ident(),time.time()
         definition={'admin_password':secrets.token_urlsafe(36),'app_password':secrets.token_urlsafe(36)} if kind=='database' else {}
         if import_id:definition['import_id']=import_id
-        db.execute('INSERT INTO data_resources VALUES(?,?,?,?,?,?,?,?,?,?)',(resource,project,kind,stage,'restoring' if import_id else 'queued',self.store.seal(definition),None,None,now,now))
+        db.execute('INSERT INTO data_resources(id,project_id,kind,stage,state,definition,backend,error,created,updated,runtime_driver) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(resource,project,kind,stage,'restoring' if import_id else 'queued',self.store.seal(definition),None,None,now,now,driver))
         return resource
 
     def bind_resources(self,db,project_id,config,environment):
@@ -55,6 +75,9 @@ class DataStore:
                 raise Problem(409,'Release target and data stage must match; preview cannot use production data')
             if resource['state'] != 'ready':
                 raise Problem(409,'Data resource is not ready')
+            personal = db.execute('SELECT preview_mode FROM projects WHERE id=?',(project_id,)).fetchone()['preview_mode']=='isolated'
+            if personal and resource['runtime_driver'] != NATIVE_DATABASE_DRIVER:
+                raise Problem(409,'Personal previews require a native database binding')
             if kind == 'database':
                 password = self.store.unseal(resource['definition'])['app_password']
                 environment['DATABASE_URL'] = f'postgresql://app:{password}@db-{resource_id}:5432/app'
@@ -80,14 +103,15 @@ class DataStore:
             job_id, now = ident(), time.time()
             state = 'deleting' if operation == 'delete' else 'queued'
             db.execute('UPDATE data_resources SET state=?,error=NULL,updated=? WHERE id=?',(state,now,resource_id))
-            db.execute('INSERT INTO jobs(id,project_id,kind,resource_id,created,updated) VALUES(?,?,?,?,?,?)',(job_id,resource['project_id'],resource['kind']+('-delete' if operation=='delete' else '-create'),resource_id,now,now))
+            db.execute('INSERT INTO jobs(id,project_id,kind,resource_id,created,updated,preview_access) VALUES(?,?,?,?,?,?,?)',(job_id,resource['project_id'],resource['kind']+('-delete' if operation=='delete' else '-create'),resource_id,now,now,resource['stage']=='preview'))
             self.store.audit(db,actor,resource['kind']+'.'+operation,resource_id)
         return {'job_id':job_id,'id':resource_id,'state':state}
 
     @staticmethod
     def view(row):
-        return {key:row[key] for key in ['id','project_id','kind','stage','state','error','created','updated']} | {
+        native = row['runtime_driver'] == NATIVE_DATABASE_DRIVER
+        return {key:row[key] for key in ['id','project_id','kind','stage','state','error','created','updated','runtime_driver']} | {
             'engine':'postgresql-16' if row['kind']=='database' else 'filesystem',
             'persistence':'independent of release deletion and app sleep',
-            'disk_limit':{'scope':'shared tenant VM','gib':12},
+            'disk_limit':{'scope':'dedicated database' if native else 'shared tenant VM','gib':2 if native else 12},
             'connection':'DATABASE_URL injected into explicitly bound dynamic releases' if row['kind']=='database' else 'Mounted at /data; PAAS_DATA_DIR injected'}

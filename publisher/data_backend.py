@@ -4,6 +4,7 @@ import time
 from publisher.backend import BackendError
 from publisher.runtime import RuntimeRegistry
 from publisher.executor import ExecutionFailure
+from publisher.store import NATIVE_DATABASE_DRIVER
 
 
 class DataBackend:
@@ -37,6 +38,14 @@ class DataBackend:
 
     def create(self,resource,check,*,import_id=None):
         account=self.account(resource['project_id'])
+        if resource.get('runtime_driver') == NATIVE_DATABASE_DRIVER:
+            if import_id:
+                raise BackendError('Native database imports are not enabled yet')
+            check()
+            credentials=self.store.unseal(resource['definition'])
+            result=self.client.native_database(account,resource['id'],resource['project_id'],'ensure',**credentials)
+            check()
+            return result
         target=RuntimeRegistry(self.backend).ensure(account)
         check()
         labels={'paas.publisher.import':import_id} if import_id else {}
@@ -75,6 +84,9 @@ class DataBackend:
         raise BackendError('PostgreSQL did not become ready; existing volume was preserved')
 
     def remove(self,resource,check):
+        if resource.get('runtime_driver') == NATIVE_DATABASE_DRIVER:
+            check()
+            return self.client.native_database(self.account(resource['project_id']),resource['id'],resource['project_id'],'delete')
         if self.store.unseal(resource['definition']).get('import_id'):
             self.request(resource,'restore-idle')
         candidates=self.backend.api('project.one',query={'projectId':self.backend.config['project_id']})

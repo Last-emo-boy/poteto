@@ -78,7 +78,7 @@ class PersonalPreviewTests(unittest.TestCase):
         with self.store.connection() as db:
             owner=self.store.mint_token(db,{'id':None,'account_id':self.account},name='owner',scopes=['*'],project_ids=None,expires=9999999999)['token']
         with TestClient(self.app,headers={'Authorization':'Bearer '+owner}) as privileged:
-            self.assertEqual(422,privileged.post(self.base+'/databases',json={'stage':'preview'}).status_code)
+            self.assertEqual(503,privileged.post(self.base+'/databases',json={'stage':'preview'}).status_code)
         with self.store.connection() as db:
             self.assertEqual(0,db.execute('SELECT count(*) FROM deployments WHERE project_id=?',(self.project,)).fetchone()[0])
             self.assertEqual(0,db.execute('SELECT count(*) FROM data_resources WHERE project_id=?',(self.project,)).fetchone()[0])

@@ -267,6 +267,8 @@ class Dokploy:
             wake['personal_preview'] = True
         if config.get('outbound_network') == 'web':
             wake['outbound_network'] = 'web'
+        if config.get('database_id'):
+            wake['database_id'] = config['database_id']
         record = self.sandbox_action(deployment, 'start', port=port, memory_mb=config['memory_mb'],
                                      cpus=config['cpus'], environment=self.runtime_environment(deployment, port), **wake)
         check()

@@ -21,7 +21,7 @@ import tarfile
 import tempfile
 import time
 
-from execution import builder_profile, native_build, prebuilt_image, sandbox
+from execution import builder_profile, native_build, native_database, prebuilt_image, sandbox
 
 ROOT = Path(os.environ.get("PAAS_EXEC_ROOT", "/srv/ovh-paas-execution"))
 RESTORES = Path('/srv/ovh-paas-platform/restore')
@@ -368,6 +368,8 @@ def retire_runtime(account, phase):
             for spec in (ROOT/'builds').glob('*/spec.json'):
                 if json.loads(spec.read_text())['account_id'] == account:
                     raise ExecutionError('Tenant still owns a build; remove it through project cleanup first')
+            if any(record['account_id'] == account for record in native_database.records(ROOT)):
+                raise ExecutionError('Tenant still owns a database; remove it through project cleanup first')
             with lock('placements'):
                 record = placement_for_retirement(placements(), account)
             if record:
@@ -958,7 +960,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.response(404, {"error": "Unknown execution operation"})
             resource_id = checked_id(parts[2])
             size = int(self.headers.get("Content-Length", "0"))
-            if parts[1] == "sandboxes":
+            if parts[1] in {"sandboxes", "databases"}:
                 if not 0 < size <= 400 * 1024:
                     raise ValueError("Invalid sandbox request size")
                 self.connection.settimeout(15)
@@ -966,6 +968,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 leases.enter_context(active_account(checked_id(body["account_id"])))
                 with lock("sandbox-placements"):
                     config = json.loads((ROOT / "config.json").read_text())
+                    if parts[1] == 'databases':
+                        return self.response(200, native_database.operation(ROOT, config, resource_id, body,
+                                                                           admit=lambda size: admit_space(incoming=size)))
                     return self.response(200, sandbox.operation(ROOT, config, resource_id, body, status))
             if parts[1] == "runtimes":
                 if not 0 < size <= 4096:

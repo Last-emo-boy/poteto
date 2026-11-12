@@ -237,7 +237,7 @@ class CliLoginTests(unittest.TestCase):
     def test_disabled_and_maintenance_preserve_the_existing_auth_boundary(self):
         with patch.dict(os.environ, {"PAAS_OIDC_CONFIG_FILE": ""}):
             self.assertEqual(401, TestClient(create_app(self.settings)).get(LOGIN_PATH).status_code)
-        self.assertEqual({"issuer": ISSUER, "client_id": "poteto-cli", "preview_management": True, "preview_environment": True, "web_egress": False}, self.api.get(LOGIN_PATH).json())
+        self.assertEqual({"issuer": ISSUER, "client_id": "poteto-cli", "preview_management": True, "preview_environment": True, "web_egress": False, "preview_data": False}, self.api.get(LOGIN_PATH).json())
         self.assertEqual(401, self.api.post("/v1/projects", json={"name": "bad"}).status_code)
         self.assertEqual(401, self.api.delete(LOGIN_PATH).status_code)
         self.assertEqual(413, self.api.post(LOGIN_PATH, content=b"x" * 65537).status_code)
@@ -281,3 +281,16 @@ class CliLoginTests(unittest.TestCase):
         self.assertEqual(201,response.status_code,response.text)
         self.assertEqual([PREVIEW_SCOPE,PREVIEW_WEB_SCOPE],response.json()['scopes'])
         self.assertEqual([self.project],response.json()['project_ids'])
+
+    def test_database_login_requires_an_explicit_option_and_operator_switch(self):
+        from dataclasses import replace
+        from publisher.store import PREVIEW_DATA_SCOPE
+        store = self.api.app.state.store
+        with patch("publisher.oidc_login.urlopen", side_effect=lambda *a, **k: self.token_response(self.body["nonce"])), patch.object(jwt.PyJWKClient, "fetch_data", return_value=self.jwks):
+            self.assertEqual(503, self.api.post(LOGIN_PATH, json=self.body|{'manage_data':True}).status_code)
+            with patch.object(store, 'settings', replace(store.settings, native_databases=True)):
+                response = self.api.post(LOGIN_PATH, json=self.body|{'manage_data':True})
+        self.assertEqual(201, response.status_code, response.text)
+        self.assertEqual([PREVIEW_SCOPE, PREVIEW_DATA_SCOPE], response.json()['scopes'])
+        self.assertEqual([self.project], response.json()['project_ids'])
+        self.assertEqual(422, self.api.post(LOGIN_PATH, json=self.body|{'manage_data':'yes'}).status_code)

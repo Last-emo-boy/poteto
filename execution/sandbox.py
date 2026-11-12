@@ -45,7 +45,7 @@ def validate(spec):
     if (type(memory) is not int or not 256 <= memory <= 1024
             or type(cpu) not in (int, float) or not math.isfinite(cpu) or not 0.1 <= cpu <= 1
             or type(port) is not int or not 1024 <= port <= 65535
-            or not isinstance(env, dict) or len(env) > 103
+            or not isinstance(env, dict) or len(env) > (104 if spec.get('database_id') else 103)
             or not all(isinstance(k, str) and ENV.fullmatch(k) and isinstance(v, str)
                        and len(v) <= 16384 and "\x00" not in v for k, v in env.items())):
         raise ValueError("Invalid sandbox preview configuration (minimum memory: 256 MiB)")
@@ -114,7 +114,7 @@ class DockerSocket(http.client.HTTPConnection):
         self.sock.connect("/var/run/docker.sock")
 
 
-def create(name, image, port, host_port, memory, cpu, env, ownership, *, wake=None, dns=None):
+def create(name, image, port, host_port, memory, cpu, env, ownership, *, wake=None, dns=None, database=None):
     key = f"{port}/tcp"
     body = {
         "Image": image, "User": "10001:10001", "Tty": True,
@@ -133,6 +133,9 @@ def create(name, image, port, host_port, memory, cpu, env, ownership, *, wake=No
         },
         "NetworkingConfig": {"EndpointsConfig": {name: {}}},
     }
+    if database:
+        body['NetworkingConfig']['EndpointsConfig'][database['network']] = {}
+        body['HostConfig']['ExtraHosts'] = ['db-' + database['id'] + ':' + database['address']]
     if dns:
         body['HostConfig']['Mounts'] = [{'Type':'bind', 'Source':str(sandbox_network.RESOLV),
                                         'Target':'/etc/resolv.conf', 'ReadOnly':True}]
@@ -174,9 +177,18 @@ def observe(container, spec):
             mount.get('Type', 'bind') != 'bind' or mount.get('RW')
             or expected_mounts.get(mount.get('Destination')) != mount.get('Source') for mount in mounts):
         raise ValueError('Sandbox host mounts do not match its platform-owned files')
+    if spec.get('database'):
+        database = spec['database']
+        if (set(container['NetworkSettings']['Networks']) != {spec['network_name'], database['network']}
+                or limits.get('ExtraHosts') != ['db-' + database['id'] + ':' + database['address']]):
+            raise ValueError('Sandbox database network does not match its owned binding')
     bindings = container["NetworkSettings"]["Ports"].get(f"{port}/tcp", [])
     if bindings != [{"HostIp": "127.0.0.1", "HostPort": str(spec["host_port"])}]:
         raise ValueError("Sandbox ingress is not restricted to host loopback")
+    observe_limits(container, memory, cpu)
+
+
+def observe_limits(container, memory, cpu):
     pid = container["State"]["Pid"]
     entry = Path(f"/proc/{pid}/cgroup").read_text().strip().split("::", 1)[1]
     if not entry.startswith("/paas.slice/paas-sandbox.slice/"):
@@ -205,8 +217,10 @@ def check_pool(root, config, release, memory, cpu):
     effective_memory, (actual, period), swap = pool_state()
     if effective_memory != limit * 1024**2 or actual != round(cpus * period) or swap != 0:
         raise ValueError('Sandbox pool configuration does not match its effective cgroup limits')
-    for record in (root / 'sandboxes').glob('*.json'):
-        if record.stem == release:
+    reservations = list((root / 'sandboxes').glob('*.json')) + list((root / 'native-databases').glob('*/database.json'))
+    for record in reservations:
+        identity = record.stem if record.parent.name == 'sandboxes' else record.parent.name
+        if identity == release:
             continue
         value = json.loads(record.read_text())
         if 'memory_mb' not in value or 'cpus' not in value:
@@ -247,6 +261,10 @@ def operation(root, config, release, body, build_status):
         if outbound == 'web' and config.get('sandbox_web') is not True:
             raise ValueError('Sandbox web egress is not enabled')
         dns = sandbox_network.dns_servers(config) if outbound == 'web' else None
+        database = None
+        if body.get('database_id'):
+            from execution.native_database import binding
+            database = binding(root, config, body['database_id'], account, project)
         wake = sandbox_wake.options(release, body)
         if wake and ((not personal and config.get("sandbox_sleep_projects", {}).get(project) != account)
                      or not sandbox_wake.HEALTHCHECK.is_file()):
@@ -279,9 +297,13 @@ def operation(root, config, release, body, build_status):
                 raise ValueError("Sandbox name is already in use")
             receipt = {"account_id": account, "project_id": project, "host_port": host_port}
             receipt |= {'memory_mb': memory, 'cpus': cpu, 'personal_preview': personal, 'outbound_network': outbound}
+            if database:
+                receipt['database_id'] = database['id']
             if wake:
                 receipt["wake"] = wake
             save(path, receipt)
+        if receipt.get('database_id') != (database['id'] if database else None):
+            raise ValueError('Sandbox database binding does not match its receipt')
         if receipt.get('outbound_network', 'none') != outbound:
             raise ValueError('Sandbox network policy does not match its receipt')
         if receipt.get("wake") != wake:
@@ -324,13 +346,13 @@ def operation(root, config, release, body, build_status):
             if wake and any(k.startswith(("sablier.", "sablierapp.dev/", "com.docker.compose."))
                             for k in metadata["Config"].get("Labels", {}) or {}):
                 raise ValueError("Sleeping sandbox images cannot supply lifecycle labels")
-            create(name, metadata["Id"], port, receipt["host_port"], memory, cpu, env, expected, wake=wake, dns=dns)
+            create(name, metadata["Id"], port, receipt["host_port"], memory, cpu, env, expected, wake=wake, dns=dns, database=database)
             container = inspect("container", name)
         owned(container["Config"]["Labels"], expected)
         if not container["State"]["Running"]:
             docker("start", name, timeout=45)
         try:
-            observe(inspect("container", name), body | {"host_port": receipt["host_port"], "dns": dns})
+            observe(inspect("container", name), body | {"host_port": receipt["host_port"], "dns": dns, "database": database, "network_name": name})
         except Exception:
             docker("stop", "-t", "2", name)
             raise

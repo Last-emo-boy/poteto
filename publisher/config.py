@@ -28,6 +28,7 @@ class Settings:
     sandbox_memory_limit_mib: int = 2048
     sandbox_cpu_limit: float = 1.5
     sandbox_web: bool = False
+    native_databases: bool = False
 
     def __post_init__(self):
         if not valid_domain(self.domain):
@@ -54,6 +55,8 @@ class Settings:
             raise ValueError('static_source_builds must be a boolean')
         if type(self.sandbox_web) is not bool:
             raise ValueError('sandbox_web must be a boolean')
+        if type(self.native_databases) is not bool:
+            raise ValueError('native_databases must be a boolean')
         if type(self.personal_previews) is not bool:
             raise ValueError('personal_previews must be a boolean')
         if type(self.sandbox_memory_limit_mib) is not int or not 256 <= self.sandbox_memory_limit_mib <= 16384:
@@ -80,7 +83,8 @@ class Settings:
                 and config['runtime'] in {'node', 'dockerfile', 'image'} and config['memory_mb'] >= 256
                 and (not selected or config['runtime'] == 'image')
                 and (not config.get('sleep') or selected or project in self.sandbox_sleep_projects)
-                and not any(config.get(k) for k in ('database_id', 'volume_id', 'migration_command')))
+                and not any(config.get(k) for k in ('volume_id', 'migration_command'))
+                and (not config.get('database_id') or (selected and self.native_databases)))
 
     @classmethod
     def from_env(cls):
@@ -101,7 +105,8 @@ class Settings:
                    personal_previews=runtime.get('personal_previews', False),
                    sandbox_memory_limit_mib=runtime.get('sandbox_memory_limit_mib', 2048),
                    sandbox_cpu_limit=runtime.get('sandbox_cpu_limit', 1.5),
-                   sandbox_web=runtime.get('sandbox_web', False))
+                   sandbox_web=runtime.get('sandbox_web', False),
+                   native_databases=runtime.get('native_databases', False))
 
     @property
     def sandbox_limits(self):

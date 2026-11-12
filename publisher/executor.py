@@ -130,6 +130,10 @@ class ExecutionClient:
         return self.request('POST','/v1/runtimes/'+account_id+'/data',
             {'action':action,'resource_id':resource_id,'project_id':project_id} | fields)
 
+    def native_database(self, account_id, resource_id, project_id, action, **fields):
+        return self.request('POST', '/v1/databases/' + resource_id,
+                            fields | {'action':action,'account_id':account_id,'project_id':project_id})
+
     def restore_data(self,account_id,spec,payload):
         with Path(payload).open('rb') as source:
             return self.request('POST','/v1/runtimes/'+account_id+'/restore-data',source,{

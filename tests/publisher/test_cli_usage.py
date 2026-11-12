@@ -86,11 +86,11 @@ class PreviewLoginOptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             client = Mock(url='https://deploy.example.test')
             client.request.side_effect = [
-                {'issuer':ISSUER,'client_id':'client','preview_environment':True,'web_egress':True},
+                {'issuer':ISSUER,'client_id':'client','preview_environment':True,'web_egress':True,'preview_data':True},
                 {'token':'synthetic-token','project_id':'a'*24}]
             with patch.object(cli_login,'authorize',return_value={'code':'code','verifier':'v','nonce':'n'}):
-                cli_login.login(client,Path(directory)/'token.json',manage_env=True,allow_web=True)
-            self.assertEqual({'code':'code','verifier':'v','nonce':'n','manage_env':True,'allow_web':True},client.request.call_args.args[2])
+                cli_login.login(client,Path(directory)/'token.json',manage_env=True,allow_web=True,manage_data=True)
+            self.assertEqual({'code':'code','verifier':'v','nonce':'n','manage_env':True,'allow_web':True,'manage_data':True},client.request.call_args.args[2])
             client.request.side_effect = [{'issuer':ISSUER,'client_id':'client'}]
             with patch.object(cli_login,'authorize') as browser, self.assertRaisesRegex(RuntimeError,'permission'):
                 cli_login.login(client,Path(directory)/'unsupported.json',allow_web=True)

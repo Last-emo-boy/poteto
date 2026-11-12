@@ -1,7 +1,7 @@
 """Admission reservations, shared by quota checks and user-facing usage."""
 import json
 
-from publisher.store import ARTIFACT_DRIVER, SANDBOX_DRIVER
+from publisher.store import ARTIFACT_DRIVER, SANDBOX_DRIVER, NATIVE_DATABASE_DRIVER
 
 ACCOUNT = {"memory_mib": 4096, "vcpus": 4}
 PLATFORM = {"memory_mib": 20480, "vcpus": 6}
@@ -37,9 +37,11 @@ def reservations(db, excluding=""):
         add(result["accounts"].setdefault(row["account_id"], empty()), amount)
         if row["runtime_driver"] == SANDBOX_DRIVER:
             add(result["sandbox"], amount)
-    for row in db.execute("SELECT p.account_id FROM data_resources r JOIN projects p ON p.id=r.project_id WHERE r.kind='database'"):
+    for row in db.execute("SELECT p.account_id,r.runtime_driver FROM data_resources r JOIN projects p ON p.id=r.project_id WHERE r.kind='database'"):
         add(result["platform"], DATABASE)
         add(result["accounts"].setdefault(row["account_id"], empty()), DATABASE)
+        if row['runtime_driver'] == NATIVE_DATABASE_DRIVER:
+            add(result['sandbox'], DATABASE)
     return result
 
 
