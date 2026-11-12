@@ -17,6 +17,7 @@ ROOT=Path('/srv/ovh-paas-platform')
 CONTROL=Path('/srv/ovh-paas')
 EXECUTION=Path('/srv/ovh-paas-execution')
 CODE=Path('/opt/paas-execution')
+UNITS=Path('/etc/systemd/system')
 
 
 def run(*args,**kwargs):
@@ -99,6 +100,8 @@ def metadata(stage,request):
         source=EXECUTION/name
         if source.exists():copy_file(source,destination/'state'/name)
     if (EXECUTION/'retired').is_dir():copy_tree(EXECUTION/'retired',destination/'state/retired')
+    for name in ['sandboxes','sandbox-wake','sandbox-retired-ports']:
+        if (EXECUTION/name).is_dir():copy_tree(EXECUTION/name,destination/'state'/name)
     copy_tree(CODE,destination/'code')
     builds=EXECUTION/'builds'
     for job in builds.iterdir():
@@ -111,15 +114,20 @@ def metadata(stage,request):
     for name in ['config.env','resolv.conf','egress.nft','publisher-edge.token','publisher-domains.json']:
         if (CONTROL/name).is_file():copy_file(CONTROL/name,stage/'controller-host'/name)
     units=stage/'units';units.mkdir(mode=0o700)
-    for pattern in ['ovh-paas-*.service','paas-*.service','paas-execution.slice']:
-        for file in Path('/etc/systemd/system').glob(pattern):
+    for pattern in ['ovh-paas-*.service','paas-*.service','paas-*.slice']:
+        for file in UNITS.glob(pattern):
             if file.is_file():copy_file(file,units/file.name)
     for name in ['ovh-paas-vm.service.d','ovh-paas-egress.service.d']:
-        source=Path('/etc/systemd/system')/name
+        source=UNITS/name
         if source.exists():copy_tree(source,units/name)
+    for pattern in ['paas-*.slice.d','paas-*.service.d']:
+        for source in UNITS.glob(pattern):
+            if source.is_dir():copy_tree(source,units/source.name)
     manifest={key:request[key] for key in ['format','id','created','code_revision','vms']}
     manifest['encryption']='age/X25519'
     manifest['restore']='standalone qcow2; restore clones must use independent UIDs and loopback ports'
+    manifest['sandbox_count']=len(list((EXECUTION/'sandboxes').glob('*.json')))
+    manifest['sandbox_recovery']='Recreate stateless containers on the restored executor with publisher.sandbox_restore after provisioning the sandbox runtime.'
     write_json(stage/'manifest.json',manifest)
 
 

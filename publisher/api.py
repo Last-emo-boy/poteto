@@ -169,6 +169,22 @@ def create_app(settings=None):
             row = store.project(db, user, project_id)
         return {k: v for k, v in row.items() if k not in {"environment", "preview_environment"}} | {"url": "https://" + settings.hostname(project_id,domain=row["app_domain"])}
 
+    @app.get('/v1/projects/{project_id}/capabilities', tags=['Projects'])
+    def project_capabilities(project_id: str, user=Depends(actor)):
+        with store.connection() as db:
+            project = store.project(db, user, project_id, 'deployments:read', allow_preview=True)
+        personal = project['preview_mode'] == 'isolated'
+        image = {'runtime': 'image', 'target': 'preview', 'memory_mb': 256, 'sleep': personal}
+        return {'project_id': project_id, 'preview_mode': project['preview_mode'],
+                'enabled': settings.personal_previews if personal else True,
+                'local_build_required': personal,
+                'static_vm_free': settings.artifact_enabled(project_id, {'runtime': 'static'}, personal=personal),
+                'prebuilt_images': settings.personal_previews if personal else project_id in settings.prebuilt_image_projects,
+                'stateless_preview_driver': 'gvisor' if settings.sandbox_enabled(project_id, image, personal=personal) else None,
+                'image_defaults': {'memory_mb': 256, 'cpus': 0.1, 'sleep': True} if personal else None,
+                'sandbox_pool': settings.sandbox_limits,
+                'limitations': ['No outbound network', 'No database or volume binding', 'Image previews only; no VM fallback'] if personal else []}
+
     @app.patch('/v1/projects/{project_id}',tags=['Projects'])
     def rename_project(project_id: str,body: ProjectInput,user=Depends(actor)):
         return store.rename_project(user,project_id,body.name)
@@ -200,7 +216,7 @@ def create_app(settings=None):
 
     @app.post("/v1/projects/{project_id}/preflight", tags=["Deployments"])
     def preflight(project_id: str, body: PreflightInput, user=Depends(actor)):
-        return store.preflight(user, project_id, body.configuration.configuration(),
+        return store.preflight(user, project_id, store.configuration(user, project_id, body.configuration),
                                body.archive_bytes, body.unpacked_bytes, body.files)
 
     @app.post("/v1/projects/{project_id}/deployments", status_code=201, tags=["Deployments"])
@@ -208,7 +224,7 @@ def create_app(settings=None):
         key = request.headers.get("Idempotency-Key")
         if key and not re.fullmatch(r"[a-zA-Z0-9_.:-]{1,128}", key):
             raise Problem(422, "Invalid Idempotency-Key")
-        return release_view(store.create_deployment(user, project_id, body.configuration(), key))
+        return release_view(store.create_deployment(user, project_id, store.configuration(user, project_id, body), key))
 
     @app.put("/v1/deployments/{deployment_id}/source", status_code=202, tags=["Deployments"],
              openapi_extra={"requestBody": {"required": True, "content": {"application/gzip": {"schema": {"type": "string", "format": "binary"}}}}})

@@ -127,6 +127,8 @@ class Store:
                 db.execute("ALTER TABLE projects ADD COLUMN preview_environment TEXT")
             if 'preview_access' not in {r['name'] for r in db.execute('PRAGMA table_info(deployments)')}:
                 db.execute("ALTER TABLE deployments ADD COLUMN preview_access INTEGER NOT NULL DEFAULT 0")
+            if 'preview_mode' not in {r['name'] for r in db.execute('PRAGMA table_info(projects)')}:
+                db.execute("ALTER TABLE projects ADD COLUMN preview_mode TEXT NOT NULL DEFAULT 'legacy'")
             if 'runtime_driver' not in {r['name'] for r in db.execute('PRAGMA table_info(deployments)')}:
                 db.execute("ALTER TABLE deployments ADD COLUMN runtime_driver TEXT")
             if 'built_bytes' not in {r['name'] for r in db.execute('PRAGMA table_info(deployments)')}:
@@ -272,7 +274,7 @@ class Store:
         project=self.project(db, actor, row["project_id"], scope, allow_preview=allow_preview)
         if PREVIEW_SCOPE in actor['scopes'] and not row['preview_access']:
             raise Problem(404, "Deployment not found")
-        return dict(row)|{'app_domain':project['app_domain']}
+        return dict(row)|{'app_domain':project['app_domain'], 'preview_mode':project['preview_mode']}
 
     def create_project(self, actor, name):
         self.permit(actor, "projects:write")
@@ -308,6 +310,8 @@ class Store:
         actor = {"id": None, "account_id": account_id}
         self.audit(db, actor, "account.cli-enroll", account_id)
         project_id = self.insert_project(db, actor, "preview")["id"]
+        if self.settings.personal_previews:
+            db.execute("UPDATE projects SET preview_mode='isolated' WHERE id=?", (project_id,))
         db.execute("INSERT INTO cli_identities VALUES(?,?,?)", (issuer, subject, project_id))
         return project_id
 
@@ -370,8 +374,8 @@ class Store:
         total, sandbox = totals["platform"], totals["sandbox"]
         account = totals["accounts"].get(account_id, capacity.empty())
         # Match the sandbox slice envelope, rather than over-reserving its parent limits.
-        if driver == SANDBOX_DRIVER and (sandbox["memory_mib"] + config['memory_mb'] > capacity.SANDBOX["memory_mib"]
-                                         or sandbox["vcpus"] + config['cpus'] > capacity.SANDBOX["vcpus"]):
+        if driver == SANDBOX_DRIVER and (sandbox["memory_mib"] + config['memory_mb'] > self.settings.sandbox_limits["memory_mib"]
+                                         or sandbox["vcpus"] + config['cpus'] > self.settings.sandbox_limits["vcpus"]):
             raise Problem(429, "Sandbox preview pool capacity is reserved; remove an unused sandbox preview")
         if account["memory_mib"] + config["memory_mb"] > capacity.ACCOUNT["memory_mib"]:
             raise Problem(429, "Account runtime memory reservation exceeds 4096 MiB; delete unused releases")
@@ -382,13 +386,21 @@ class Store:
 
     def deployment_preconditions(self, db, actor, project, config):
         project_id = project['id']
-        if config['runtime'] == 'image' and project_id not in self.settings.prebuilt_image_projects:
+        personal = project['preview_mode'] == 'isolated'
+        if personal:
+            if not self.settings.personal_previews:
+                raise Problem(503, 'The personal preview runtime is temporarily disabled')
+            if config['runtime'] not in {'static', 'image'} or config.get('build_command'):
+                raise Problem(422, 'Build this personal project on your computer or CI with poteto deploy --local-build')
+            if config['runtime'] == 'image' and not self.settings.sandbox_enabled(project_id, config, personal=True):
+                raise Problem(422, 'Personal image previews need at least 256 MiB, no persistent data bindings and target preview; use a managed project for other workloads')
+        if config['runtime'] == 'image' and not personal and project_id not in self.settings.prebuilt_image_projects:
             raise Problem(403, "Prebuilt image deployment is not enabled for this project")
         account = self.check_concurrency(db, actor)
         driver = None
-        if self.settings.artifact_enabled(project_id, config):
+        if self.settings.artifact_enabled(project_id, config, personal=personal):
             driver = ARTIFACT_DRIVER
-        elif self.settings.sandbox_enabled(project_id, config):
+        elif self.settings.sandbox_enabled(project_id, config, personal=personal):
             driver = SANDBOX_DRIVER
         self.check_runtime_capacity(db, actor["account_id"], config, driver=driver)
         from publisher.data_store import DataStore
@@ -410,6 +422,7 @@ class Store:
             if used + archive_bytes + unpacked_bytes > account['max_storage']:
                 raise Problem(429, "Artifact storage quota reached")
             return {"ok": True, "project_id": project_id, "target": config['target'], "runtime_driver": driver,
+                    "preview_mode": project['preview_mode'], "configuration": config,
                     "upload": {"archive_bytes": archive_bytes, "unpacked_bytes": unpacked_bytes, "files": files,
                                "limit_bytes": upload_limit, "expansion_limit_bytes": unpack_limit, "file_limit": file_limit},
                     "storage": {"used_bytes": used, "limit_bytes": account['max_storage'],
@@ -427,12 +440,18 @@ class Store:
                         raise Problem(409, "Idempotency key was used with different configuration")
                     if PREVIEW_SCOPE in actor['scopes'] and not old['preview_access']:
                         raise Problem(409, "Idempotency key is already in use")
-                    return dict(old)|{'app_domain':project['app_domain']}
+                    return dict(old)|{'app_domain':project['app_domain'], 'preview_mode':project['preview_mode']}
             driver, environment, _ = self.deployment_preconditions(db, actor, project, config)
             deployment_id, now = ident(), time.time()
             db.execute("INSERT INTO deployments(id,project_id,state,config,environment,idempotency_key,created,updated,preview_access,runtime_driver) VALUES(?,?,?,?,?,?,?,?,?,?)", (deployment_id, project_id, "uploading", encode(config), self.seal(environment), key, now, now, preview, driver))
             self.audit(db, actor, "deployment.create", deployment_id)
-            return dict(db.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone())|{'app_domain':project['app_domain']}
+            return dict(db.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone())|{'app_domain':project['app_domain'], 'preview_mode':project['preview_mode']}
+
+    def configuration(self, actor, project_id, model):
+        with self.connection() as db:
+            project = self.project(db, actor, project_id, 'deployments:write', allow_preview=model.target == 'preview')
+        defaults = {'cpus': 0.1, 'sleep': True} if project['preview_mode'] == 'isolated' and model.runtime == 'image' else {}
+        return model.configuration(defaults=defaults)
 
     def patch_environment(self, actor, project_id, values, remove, target):
         from pydantic import ValidationError

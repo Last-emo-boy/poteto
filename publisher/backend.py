@@ -235,12 +235,15 @@ class Dokploy:
 
     def publish_sandbox(self, deployment, archive, log, check):
         config = json.loads(deployment['config'])
-        if not self.settings.sandbox_enabled(deployment['project_id'], config):
+        personal = deployment.get('preview_mode') == 'isolated'
+        if not self.settings.sandbox_enabled(deployment['project_id'], config, personal=personal):
             raise BackendError('This project is no longer enabled for sandbox previews')
         self.build_output(deployment, config, archive, self.account(deployment), log, check,
                           native_only=config['runtime'] != 'image')
         port = config['port']
         wake = {'sleep': True, 'hostname': self.hostname(deployment), 'health_check': config['health_check']} if config['sleep'] else {}
+        if personal:
+            wake['personal_preview'] = True
         record = self.sandbox_action(deployment, 'start', port=port, memory_mb=config['memory_mb'],
                                      cpus=config['cpus'], environment=self.runtime_environment(deployment, port), **wake)
         check()
@@ -501,6 +504,8 @@ class Dokploy:
                 build['require_native'] = True
             if static:
                 build['output_kind'] = 'static'
+            if deployment.get('preview_mode') == 'isolated' and build.get('runtime') == 'image':
+                build['personal_preview'] = True
             status = client.start_build(deployment['id'], build | {'account_id': account_id, 'project_id': deployment['project_id']}, archive)
         if native_only and status.get('driver') != 'native':
             raise BackendError('Sandbox preview requires a trusted native build')

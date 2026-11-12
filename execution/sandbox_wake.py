@@ -6,7 +6,7 @@ import re
 import sys
 import time
 
-APP_PORTS = range(23000, 23032)
+APP_PORTS = range(23000, 23064)
 PROXY_PORT = 23100
 PROXY = "poteto-sandbox-wake-proxy"
 HEALTHCHECK = Path("/opt/paas-execution/healthcheck")

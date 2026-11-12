@@ -65,6 +65,8 @@ def lookup(db,store,actor,operation):
 def create(store,actor,project_id,body):
     with store.connection() as db:
         project=store.project(db,actor,project_id,'imports:write')
+        if project['preview_mode'] == 'isolated':
+            raise Problem(422, 'Restore production bundles into a managed project, not a stateless personal preview')
         for scope in scopes(body.kinds):store.permit(actor,scope,project_id)
         if project['current_deployment'] or any(store.environment(project,target) for target in ('production','preview')) or db.execute('SELECT 1 FROM deployments WHERE project_id=?',(project_id,)).fetchone() or db.execute('SELECT 1 FROM data_resources WHERE project_id=?',(project_id,)).fetchone():
             raise Problem(409,'Import requires an empty destination without releases, data or environment values')

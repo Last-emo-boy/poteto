@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -23,6 +24,9 @@ class Settings:
     sandbox_projects: tuple[str, ...] = ()
     prebuilt_image_projects: tuple[str, ...] = ()
     sandbox_sleep_projects: tuple[str, ...] = ()
+    personal_previews: bool = False
+    sandbox_memory_limit_mib: int = 2048
+    sandbox_cpu_limit: float = 1.5
 
     def __post_init__(self):
         if not valid_domain(self.domain):
@@ -47,6 +51,13 @@ class Settings:
 
         if type(self.static_source_builds) is not bool:
             raise ValueError('static_source_builds must be a boolean')
+        if type(self.personal_previews) is not bool:
+            raise ValueError('personal_previews must be a boolean')
+        if type(self.sandbox_memory_limit_mib) is not int or not 256 <= self.sandbox_memory_limit_mib <= 16384:
+            raise ValueError('sandbox_memory_limit_mib must be between 256 and 16384')
+        if (type(self.sandbox_cpu_limit) not in (int, float) or not math.isfinite(self.sandbox_cpu_limit)
+                or not 0.1 <= self.sandbox_cpu_limit <= 8):
+            raise ValueError('sandbox_cpu_limit must be between 0.1 and 8')
 
     def upload_limits(self, runtime):
         if runtime == "image":
@@ -54,16 +65,18 @@ class Settings:
             return UPLOAD_LIMIT, UNPACK_LIMIT, FILE_LIMIT
         return self.upload_limit, self.unpack_limit, self.file_limit
 
-    def artifact_enabled(self, project, config, *, restored=False):
+    def artifact_enabled(self, project, config, *, restored=False, personal=False):
         selection = self.static_artifacts
-        return (selection is True or (selection is not False and project in selection)) and (
+        return ((personal and self.personal_previews) or selection is True or (selection is not False and project in selection)) and (
             config['runtime'] == 'static' and (
                 not config.get('build_command') or self.static_source_builds or restored))
 
-    def sandbox_enabled(self, project, config):
-        return (project in self.sandbox_projects and config['target'] == 'preview'
+    def sandbox_enabled(self, project, config, *, personal=False):
+        selected = personal and self.personal_previews
+        return ((selected or project in self.sandbox_projects) and config['target'] == 'preview'
                 and config['runtime'] in {'node', 'dockerfile', 'image'} and config['memory_mb'] >= 256
-                and (not config.get('sleep') or project in self.sandbox_sleep_projects)
+                and (not selected or config['runtime'] == 'image')
+                and (not config.get('sleep') or selected or project in self.sandbox_sleep_projects)
                 and not any(config.get(k) for k in ('database_id', 'volume_id', 'migration_command')))
 
     @classmethod
@@ -81,7 +94,14 @@ class Settings:
                    static_source_builds=runtime.get('static_source_builds', False),
                    sandbox_projects=runtime.get('sandbox_projects', ()),
                    sandbox_sleep_projects=runtime.get('sandbox_sleep_projects', ()),
-                   prebuilt_image_projects=runtime.get('prebuilt_image_projects', ()))
+                   prebuilt_image_projects=runtime.get('prebuilt_image_projects', ()),
+                   personal_previews=runtime.get('personal_previews', False),
+                   sandbox_memory_limit_mib=runtime.get('sandbox_memory_limit_mib', 2048),
+                   sandbox_cpu_limit=runtime.get('sandbox_cpu_limit', 1.5))
+
+    @property
+    def sandbox_limits(self):
+        return {'memory_mib': self.sandbox_memory_limit_mib, 'vcpus': self.sandbox_cpu_limit}
 
     @property
     def db(self):

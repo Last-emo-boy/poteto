@@ -12,8 +12,8 @@ def main():
     uids = [pwd.getpwnam(name).pw_uid for name in ["paasbuild", *[f"paasrt{i}" for i in range(4)]]]
     uid_set = "{ " + ", ".join(str(uid) for uid in uids) + " }"
     controller = pwd.getpwnam("paasvm").pw_uid
-    sandbox_ports = ", 23000-23031" if config.get("sandbox_projects") else ""
-    if config.get("sandbox_sleep_projects"):
+    sandbox_ports = ", 23000-23063" if config.get("sandbox_projects") or config.get('personal_previews') else ""
+    if config.get("sandbox_sleep_projects") or config.get('personal_previews'):
         sandbox_ports += ", 23100"
     controller_rule = f'   meta skuid {controller} ip daddr 127.0.0.1 tcp dport {{ 21999, 22100-22103, 22200-22203{sandbox_ports} }} accept comment "publisher-execution-control"\n'
     rules = f'''destroy table inet ovh_paas_execution

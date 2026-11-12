@@ -176,6 +176,39 @@ def observe(container, spec):
         raise ValueError("Sandbox resource limits were not enforced by the host")
 
 
+def pool_state():
+    group = Path('/sys/fs/cgroup/paas.slice/paas-sandbox.slice')
+    return (int((group / 'memory.max').read_text()), tuple(map(int, (group / 'cpu.max').read_text().split())),
+            int((group / 'memory.swap.max').read_text()))
+
+
+def check_pool(root, config, release, memory, cpu):
+    limit = config.get('sandbox_memory_limit_mib', 2048)
+    cpus = config.get('sandbox_cpu_limit', 1.5)
+    if (type(limit) is not int or not 256 <= limit <= 16384 or type(cpus) not in (int, float)
+            or not math.isfinite(cpus) or not 0.1 <= cpus <= 8):
+        raise ValueError('Invalid sandbox pool limits')
+    subprocess.run(['systemctl', 'start', 'paas-sandbox.slice'], check=True, timeout=15)
+    effective_memory, (actual, period), swap = pool_state()
+    if effective_memory != limit * 1024**2 or actual != round(cpus * period) or swap != 0:
+        raise ValueError('Sandbox pool configuration does not match its effective cgroup limits')
+    for record in (root / 'sandboxes').glob('*.json'):
+        if record.stem == release:
+            continue
+        value = json.loads(record.read_text())
+        if 'memory_mb' not in value or 'cpus' not in value:
+            container = inspect('container', 'poteto-sbx-' + record.stem)
+            if container is None:
+                raise ValueError('An older sandbox receipt needs reconciliation before admitting another preview')
+            owned(container['Config']['Labels'], labels(record.stem, value['account_id'], value['project_id']))
+            value |= {'memory_mb': container['HostConfig']['Memory'] // 1024**2,
+                      'cpus': container['HostConfig']['NanoCpus'] / 10**9}
+        memory += value['memory_mb']
+        cpu += value['cpus']
+    if memory > limit or round(cpu, 6) > cpus:
+        raise ValueError('Sandbox pool capacity is reserved; remove an unused preview')
+
+
 def operation(root, config, release, body, build_status):
     account, project, action = (body.get(k) for k in ("account_id", "project_id", "action"))
     if not all(isinstance(v, str) and ID.fullmatch(v) for v in (release, account, project)):
@@ -191,11 +224,14 @@ def operation(root, config, release, body, build_status):
     expected = labels(release, account, project)
     name = "poteto-sbx-" + release
     if action == "start":
-        if config.get("sandbox_projects", {}).get(project) != account:
+        personal = body.get('personal_preview', False)
+        if type(personal) is not bool or (personal and config.get('personal_previews') is not True):
+            raise ValueError('Personal preview execution is not enabled')
+        if not personal and config.get("sandbox_projects", {}).get(project) != account:
             raise ValueError("Project is not authorized for sandbox previews")
         memory, cpu, port, env = validate(body)
         wake = sandbox_wake.options(release, body)
-        if wake and (config.get("sandbox_sleep_projects", {}).get(project) != account
+        if wake and ((not personal and config.get("sandbox_sleep_projects", {}).get(project) != account)
                      or not sandbox_wake.HEALTHCHECK.is_file()):
             raise ValueError("Sandbox sleep is not provisioned for this project")
         build = root / "builds" / release
@@ -203,11 +239,15 @@ def operation(root, config, release, body, build_status):
         image = "paas-release:" + release
         status = build_status(release)
         driver = status.get("driver")
+        if personal and (driver != 'prebuilt' or spec.get('personal_preview') is not True):
+            raise ValueError('Personal previews require an owned prebuilt image receipt')
         source = ((driver == "native" and spec.get("runtime") in {"node", "dockerfile"})
                   or (driver == "prebuilt" and spec.get("runtime") == "image"))
         if not source or (spec.get("account_id"), spec.get("project_id"), status.get("state"),
                           status.get("image")) != (account, project, "succeeded", image):
             raise ValueError("Sandbox requires an owned, trusted native build or normalized prebuilt image")
+        if personal:
+            check_pool(root, config, release, memory, cpu)
         for command in (["systemctl", "is-active", "--quiet", "paas-sandbox-network.service"],
                         ["nft", "list", "table", "inet", "poteto_sandbox"]):
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
@@ -219,11 +259,15 @@ def operation(root, config, release, body, build_status):
             if inspect("container", name) or inspect("network", name):
                 raise ValueError("Sandbox name is already in use")
             receipt = {"account_id": account, "project_id": project, "host_port": host_port}
+            receipt |= {'memory_mb': memory, 'cpus': cpu, 'personal_preview': personal}
             if wake:
                 receipt["wake"] = wake
             save(path, receipt)
         if receipt.get("wake") != wake:
             raise ValueError("Sandbox wake configuration does not match its receipt")
+        if (receipt.get('personal_preview', False) != personal or receipt.get('memory_mb', memory) != memory
+                or receipt.get('cpus', cpu) != cpu):
+            raise ValueError('Sandbox resources do not match the existing receipt')
         bridge = "psbx" + str(receipt["host_port"])
         network = inspect("network", name)
         flags = [item for k, v in expected.items() for item in ("--label", k + "=" + v)]

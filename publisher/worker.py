@@ -97,7 +97,7 @@ class Worker:
         thread.start()
         with self.store.connection() as db:
             resource=dict(db.execute('SELECT * FROM data_resources WHERE id=?',(job['resource_id'],)).fetchone()) if job['resource_id'] else None
-            deployment = dict(db.execute("SELECT d.*,p.app_domain FROM deployments d JOIN projects p ON p.id=d.project_id WHERE d.id=?",
+            deployment = dict(db.execute("SELECT d.*,p.app_domain,p.preview_mode FROM deployments d JOIN projects p ON p.id=d.project_id WHERE d.id=?",
                                          (job["deployment_id"],)).fetchone()) if job['deployment_id'] else None
         try:
             self.check()

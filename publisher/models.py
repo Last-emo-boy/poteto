@@ -39,8 +39,11 @@ class DeploymentInput(Input):
             raise ValueError('A migration requires an explicit database_id')
         return self
 
-    def configuration(self):
+    def configuration(self, *, defaults=None):
         value = self.model_dump()
+        for key, default in (defaults or {}).items():
+            if key not in self.model_fields_set:
+                value[key] = default
         # Preserve the serialized contract of existing idempotency keys.
         for key in ['database_id', 'volume_id', 'migration_command']:
             if value[key] is None:

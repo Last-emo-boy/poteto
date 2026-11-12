@@ -254,6 +254,9 @@ def _show_plan(args, credential_file, client=None, *, default_preview=False):
     print(f"Files to upload: {report['upload_files']}")
     if client is not None:
         print("Remote checks passed at " + client.url)
+        effective = report['remote'].get('configuration')
+        if effective and effective.get('runtime') != 'static':
+            print(f"Runtime reservation: {effective['memory_mb']} MiB, {effective['cpus']:g} vCPU; sleep={effective['sleep']}")
 
 
 def _environment_value(args):
@@ -513,6 +516,15 @@ def main(prog="poteto"):
             if token:
                 account = client.request("GET", "/v1/me")
                 report.update({"project_ids": account["project_ids"], "scopes": account["scopes"]})
+                project = signed_in_project or (linked.project_id if linked and linked.url == client.url else None)
+                if not project and account['project_ids'] and len(account['project_ids']) == 1:
+                    project = account['project_ids'][0]
+                if project:
+                    try:
+                        report['capabilities'] = client.request('GET', f'/v1/projects/{project}/capabilities')
+                    except cli_upload.RequestError as error:
+                        if error.status != 404:
+                            raise
             else:
                 try:
                     client.request("GET", LOGIN_PATH)

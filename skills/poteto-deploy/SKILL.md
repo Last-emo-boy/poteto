@@ -9,7 +9,7 @@ description: 用 Poteto CLI 把现有应用目录预检并发布到 Poteto 的 H
 
 ## 安装与凭据
 
-如果没有可用的 Poteto 0.13.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
+如果没有可用的 Poteto 0.14.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
 
 ```sh
 curl -fsSL https://poteto.iflink.tech/install.sh | sh
@@ -48,7 +48,7 @@ poteto deploy "$APP_DIR" --prebuilt --project "$PROJECT_ID" --preview --url-only
 
 已有静态成品时，也可以直接部署含 `index.html` 的成品目录，例如 `dist/`。
 
-**动态应用分步构建时：** `poteto build "$APP_DIR"` 可构建 Node 或 Dockerfile 项目；已有可信镜像时用 `poteto build "$APP_DIR" --from-image "$IMAGE"`，不会重建。对同一个应用目录，在 `plan` 和 `deploy` 上都传 `--prebuilt-image "$APP_DIR/.poteto/image.tar.gz"`，预检加 `--remote --project "$PROJECT_ID"`，并继续用 `--preview`。镜像上限为压缩 128 MiB、展开 512 MiB；Next.js 等框架优先用多阶段 Dockerfile 和 standalone 产物。不要把凭据、运行时密钥或数据库内容打进镜像。项目未开通时说明需要管理员开启该项目，不反复提交。
+**动态应用分步构建时：** `poteto build "$APP_DIR"` 可构建 Node 或 Dockerfile 项目；已有可信镜像时用 `poteto build "$APP_DIR" --from-image "$IMAGE"`，不会重建。对同一个应用目录，在 `plan` 和 `deploy` 上都传 `--prebuilt-image "$APP_DIR/.poteto/image.tar.gz"`，预检加 `--remote --project "$PROJECT_ID"`，并继续用 `--preview`。镜像上限为压缩 128 MiB、展开 512 MiB；Next.js 等框架优先用多阶段 Dockerfile 和 standalone 产物。不要把凭据、运行时密钥或数据库内容打进镜像。先以 `poteto doctor` / 远端预检确认项目能力；新版新注册个人项目可默认接收镜像，旧托管项目仍按原开通策略。未开通时说明缺项，不反复提交。
 
 远端预检的 `runtime_driver: "gvisor"` 表示平台将直接启动隔离容器，不使用构建 VM 或租户 VM。该通道需项目另行开通，只用于至少 256 MiB、无数据库/卷/迁移、无需外网访问的预览。休眠需项目再开通 `sandbox_sleep_projects`，之后 `sleep: true` 会由 Sablier 在空闲后停止、访问时等待健康检查再唤醒；未开通时保留原运行路径。沿用应用的实际需求，不为选用此通道删除数据绑定。配额满或隔离启动失败时处理错误，不退回无隔离运行。
 
@@ -67,3 +67,5 @@ Next.js / Vite 项目可在预检和部署时同时加 `--preset nextjs` / `--pr
 `poteto usage --project "$PROJECT_ID" --json` 返回实际用于准入的空间、运行资源和并发额度预留，以及当前凭据可见的项目版本；不是实时 CPU/RSS，休眠仍保留唤醒额度。空间或资源不足时先据此定位，不重复创建部署。
 
 `poteto prune --project "$PROJECT_ID" --json` 只预览清理候选，默认保留最新三个就绪预览和最近七天的版本；生产、曾用于发布/回滚的版本、绑定数据库或卷的预览不会入选。删除须取得用户对具体 ID 的授权，再用同一筛选条件执行 `poteto prune --project "$PROJECT_ID" --yes --ids ID1 ID2 --json`。中断后重复原 ID 列表，不扩大选择。部署专用 token 没有清理权限；不要擅自扩权或替用户启用 `login --manage-previews`，应由用户使用管理凭据执行。
+
+新个人项目若显示 `preview_mode: "isolated"`，只接收本地构建的静态成品或无状态预览镜像，不会退回服务器源码编译或租户 VM。镜像默认 256 MiB、0.1 vCPU、自动休眠；以远端预检的 `configuration` 为准，保留用户显式配置。此通道没有出站网络、数据库或卷，不要为进入通道删除这些需求；需要它们时沿用已支持的托管项目。

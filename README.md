@@ -183,6 +183,27 @@ The hosted platform's credentials, routing configuration, and operational state 
 
 In the IF.Link login configuration pointed to by `PAAS_OIDC_CONFIG_FILE`, set `"auto_provision": true` to create a personal preview project after the first verified sign-in. Existing `projects_by_subject` bindings retain their projects. Leave auto-provisioning off to require an explicit binding.
 
+## Default personal previews without tenant VMs
+
+On a provisioned executor, set `personal_previews: true` in both the publisher runtime configuration and the executor configuration. **New** IF.Link enrollments then receive an `isolated` personal project. Existing projects and releases retain their original mode. `poteto doctor` exposes the selected project's capabilities, and remote preflight returns the effective configuration.
+
+Personal projects accept locally built static output and prebuilt, stateless `linux/amd64` preview images. They do not run source builds, allocate databases/volumes, import production bundles, or silently fall back to a VM. Images default to 256 MiB, 0.1 vCPU and idle sleep; explicitly supplied resources and sleep settings are preserved. The current network policy denies outbound access. Use an existing managed project for workloads requiring persistent data, outbound networking or production image deployment.
+
+The shared pool has 64 private ingress slots. Its default remains 2 GiB / 1.5 vCPU. To change it, set the same `sandbox_memory_limit_mib` and `sandbox_cpu_limit` in publisher and executor configurations, and apply matching `MemoryMax`, `MemorySwapMax=0` and `CPUQuota` values to `paas-sandbox.slice`. The executor checks effective cgroup limits and stored reservations before admitting a personal preview. Keep headroom for the controller, existing tenant VMs and the host; do not size this pool from currently free RAM alone. The controller's persistent loopback filter and executor egress policy must allow `23000–23063` and the wake proxy at `23100`.
+
+A stopped preview retains its reservation so simultaneous wake-ups cannot overbook the pool. The per-project cleanup and usage commands help reclaim old reservations; a high project count does not imply that every project can run a large dynamic application concurrently.
+
+### Restore the stateless runtimes after a platform migration
+
+Platform snapshots include sandbox receipts, wake routing, pool units/overrides and normalized build archives, while the controller disk contains application configuration and credentials. On the restored host, provision Docker, gVisor and the Caddy/Sablier images first. After restoring the executor state and the controller, stop its workers, enter the maintenance barrier, and queue reconstruction from controller root:
+
+```sh
+python -m publisher.sandbox_restore --operation RESTORE_OPERATION_ID --all
+python -m publisher.sandbox_restore --operation RESTORE_OPERATION_ID --all --apply
+```
+
+Use the same 24-character operation ID as the maintenance barrier, or select owned test releases with repeated `--deployment ID` instead of `--all`. Resume the workers and leave that barrier to process the existing deployment IDs through their normal readiness checks. Repeating the operation does not create duplicate reconstruction jobs. Review the returned job IDs and wait for readiness before restoring public traffic. These commands belong on the restored controller, never on an outbound-blocked audit clone connected to the live executor.
+
 ## Trusted native builds on Linux
 
 Poteto defaults to a disposable VM builder (KVM or explicitly configured TCG). On a Linux/amd64 host with Docker and Buildx, an operator can enable the independent native driver for projects whose source, dependencies and uploaders are trusted. Tenant runtimes, data and routes still use their existing VM path. A login or scoped upload token does not make code trusted.
@@ -215,7 +236,7 @@ Install and enable `infra/paas-publisher-static-previews.service` alongside the 
 
 For static source builds, the executor can also prewarm the official Node base image. After the build queue drains, run `sudo systemd-run --unit=paas-builder-prewarm --property=WorkingDirectory=/opt/paas-execution --property=RuntimeMaxSec=900 /usr/bin/python3 -m execution.host prepare-builder-base docker.io/library/node:24-alpine@sha256:DIGEST` with a verified digest. This creates a node-local base from the clean guest and expires the selection after seven days. Each job still gets a new overlay; project files, dependencies and environment values are never written back to the base. Disable the selection by removing `builder-profile.json` from the execution state directory. Keep previously selected base files until the disposable builder has stopped; the cache can be recreated after restoring to another host.
 
-The experimental gVisor path accepts stateless previews from trusted native builds or normalized prebuilt images. Install the [gVisor containerd shim](https://docs.docker.com/engine/daemon/alternative-runtimes/) on the executor, install the sandbox network unit, nftables rules and systemd slice from `infra/execution/`, and load the execution egress policy. If the controller VM has an additional host loopback filter, allow its service UID to reach `127.0.0.1:23000–23031` there as well. Use the same trusted project ID in the publisher's `sandbox_projects` list and the executor's `sandbox_projects` project-to-account map. Prebuilt projects also need the publisher's `prebuilt_image_projects` opt-in; they do not need a native BuildKit builder.
+The experimental gVisor path accepts stateless previews from trusted native builds or normalized prebuilt images. Install the [gVisor containerd shim](https://docs.docker.com/engine/daemon/alternative-runtimes/) on the executor, install the sandbox network unit, nftables rules and systemd slice from `infra/execution/`, and load the execution egress policy. If the controller VM has an additional host loopback filter, allow its service UID to reach `127.0.0.1:23000–23063` there as well. Use the same trusted project ID in the publisher's `sandbox_projects` list and the executor's `sandbox_projects` project-to-account map. Prebuilt projects also need the publisher's `prebuilt_image_projects` opt-in; they do not need a native BuildKit builder.
 
 For an eligible image preview, use `sleep: false`, at least 256 MiB memory, and no database, volume or migration binding, then run `poteto deploy . --local-build --preview`. The server normalizes the uploaded image and starts a gVisor container without either a build VM or tenant VM. Remote preflight reports `runtime_driver: "gvisor"`. Admission is bounded by the supplied sandbox slice's total 2 GiB memory and 1.5 CPU envelope, as well as normal account/platform quotas.
 

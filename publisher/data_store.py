@@ -22,7 +22,9 @@ class DataStore:
 
     def create(self, actor, project_id, kind, stage):
         with self.store.connection() as db:
-            self.store.project(db, actor, project_id, self.scope(kind))
+            project = self.store.project(db, actor, project_id, self.scope(kind))
+            if project['preview_mode'] == 'isolated':
+                raise Problem(422, 'Personal preview projects are stateless; use a managed project for databases and volumes')
             resource_id=self.allocate(db,actor['account_id'],project_id,kind,stage)
             job_id,now=ident(),time.time()
             db.execute('INSERT INTO jobs(id,project_id,kind,resource_id,created,updated) VALUES(?,?,?,?,?,?)',(job_id,project_id,kind+'-create',resource_id,now,now))

@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import tarfile
 
-VERSION = "0.13.0"
+VERSION = "0.14.0"
 
 _PAGE = """<!doctype html>
 <html lang="en">
