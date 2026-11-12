@@ -49,11 +49,21 @@ python - "$root" "$release" <<'PY'
 from pathlib import Path
 import sys
 from execution.prebuilt_image import normalize
+from execution.sandbox import image_identities
+import json
 
 root = Path(sys.argv[1])
 print(normalize(root / ".poteto/image.tar.gz", root / "normalized.tar", sys.argv[2]))
+(root / 'image-ids.json').write_text(json.dumps(image_identities(root / 'normalized.tar', 'paas-release:' + sys.argv[2])))
 PY
 docker image load --input "$root/normalized.tar"
+docker image inspect "$canonical" --format '{{.Id}}' > "$root/loaded-id"
+python - "$root" <<'PY'
+from pathlib import Path
+import json, sys
+root = Path(sys.argv[1])
+assert (root / 'loaded-id').read_text().strip() in json.loads((root / 'image-ids.json').read_text())
+PY
 if docker image inspect "$source" >/dev/null 2>&1; then
     echo 'Original tag leaked from the uploaded image archive' >&2
     exit 1

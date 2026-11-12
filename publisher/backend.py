@@ -237,7 +237,8 @@ class Dokploy:
         config = json.loads(deployment['config'])
         if not self.settings.sandbox_enabled(deployment['project_id'], config):
             raise BackendError('This project is no longer enabled for sandbox previews')
-        self.build_output(deployment, config, archive, self.account(deployment), log, check, native_only=True)
+        self.build_output(deployment, config, archive, self.account(deployment), log, check,
+                          native_only=config['runtime'] != 'image')
         port = config['port']
         record = self.sandbox_action(deployment, 'start', port=port, memory_mb=config['memory_mb'],
                                      cpus=config['cpus'], environment=self.runtime_environment(deployment, port))

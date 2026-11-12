@@ -1,4 +1,5 @@
 from dataclasses import replace
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -11,7 +12,7 @@ from execution import sandbox
 from publisher.backend import Dokploy
 from publisher.config import Settings
 from publisher.models import DeploymentInput
-from publisher.store import SANDBOX_DRIVER, Store
+from publisher.store import SANDBOX_DRIVER, Problem, Store
 
 
 class SandboxPreviewTests(unittest.TestCase):
@@ -65,22 +66,94 @@ class SandboxPreviewTests(unittest.TestCase):
 
     def test_image_receipt_accepts_only_the_expected_native_export_tag(self):
         tag = 'paas-release:' + self.release
-        config, digest = 'sha256:' + 'e'*64, 'sha256:' + 'b'*64
+        config_data = b'{"os":"linux","architecture":"amd64"}'
+        config = 'sha256:' + hashlib.sha256(config_data).hexdigest()
+        descriptor_data = json.dumps({'config': {'digest': config}}).encode()
+        digest = 'sha256:' + hashlib.sha256(descriptor_data).hexdigest()
         entries = {
-            'manifest.json': [{'RepoTags': [tag], 'Config': 'blobs/sha256/' + 'e'*64}],
-            'index.json': {'manifests': [{'digest': digest}]},
-            'blobs/sha256/' + 'b'*64: {'config': {'digest': config}},
+            'manifest.json': json.dumps([{'RepoTags': [tag], 'Config': 'blobs/sha256/' + config.split(':')[1]}]).encode(),
+            'index.json': json.dumps({'manifests': [{'digest': digest}]}).encode(),
+            'blobs/sha256/' + config.split(':')[1]: config_data,
+            'blobs/sha256/' + digest.split(':')[1]: descriptor_data,
         }
         archive = self.root / 'image.tar'
         with tarfile.open(archive, 'w') as tar:
-            for name, value in entries.items():
-                payload = json.dumps(value).encode()
+            for name, payload in entries.items():
                 info = tarfile.TarInfo(name)
                 info.size = len(payload)
                 tar.addfile(info, io.BytesIO(payload))
         self.assertEqual([config, digest], sandbox.image_identities(archive, tag))
         with self.assertRaisesRegex(ValueError, 'owned image tag'):
             sandbox.image_identities(archive, 'paas-release:' + 'f'*24)
+        entries['blobs/sha256/' + config.split(':')[1]] = b'{"unexpected":"content"}'
+        with tarfile.open(archive, 'w') as tar:
+            for name, payload in entries.items():
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
+        with self.assertRaisesRegex(ValueError, 'configuration digest'):
+            sandbox.image_identities(archive, tag)
+
+    def test_prebuilt_driver_requires_image_spec_and_matching_owner_before_docker(self):
+        build = self.root / 'builds' / self.release
+        build.mkdir(parents=True)
+        status = Mock(return_value={'state': 'succeeded', 'driver': 'prebuilt', 'image': 'paas-release:' + self.release})
+        config = {'sandbox_projects': {self.project: self.account}}
+        for runtime, account in [('node', self.account), ('image', 'd'*24)]:
+            (build / 'spec.json').write_text(json.dumps({'runtime': runtime, 'account_id': account, 'project_id': self.project}))
+            with patch.object(sandbox, 'docker') as docker, self.assertRaisesRegex(ValueError, 'owned'):
+                sandbox.operation(self.root, config, self.release, self.start, status)
+            docker.assert_not_called()
+
+    def test_prebuilt_preview_needs_both_opt_ins_and_never_starts_a_vm_builder(self):
+        store = Store(Settings(self.root))
+        actor = store.authenticate(store.create_account('prebuilt')['token'])
+        project = store.create_project(actor, 'app')['id']
+        settings = replace(store.settings, sandbox_projects=(project,), prebuilt_image_projects=(project,))
+        store = Store(settings)
+        backend = Dokploy({'routes': str(self.root), 'releases': str(self.root/'releases')}, settings)
+        backend.store = store
+        spec = DeploymentInput(runtime='image', target='preview', memory_mb=256, cpus=.1).configuration()
+        release = store.create_deployment(actor, project, spec, None)
+        self.assertEqual(SANDBOX_DRIVER, release['runtime_driver'])
+        for change in ({'target': 'production'}, {'database_id': 'a'*24}, {'sleep': True}, {'memory_mb': 128}):
+            self.assertFalse(settings.sandbox_enabled(project, spec | change))
+        client = Mock()
+        from publisher.executor import ExecutionFailure
+        absent = ExecutionFailure('absent')
+        absent.status = 404
+        client.build_status.side_effect = absent
+        client.start_build.return_value = {'state': 'succeeded', 'driver': 'prebuilt',
+                                          'image': 'paas-release:' + release['id'], 'image_bytes': 20480}
+        client.build_logs.return_value = ''
+        client.sandbox.return_value = {'http_port': 23000}
+        with patch.object(backend, 'execution_client', return_value=client), patch('publisher.runtime.RuntimeRegistry') as vm:
+            backend.publish_sandbox(release, self.root/'source.tar.gz', Mock(), Mock())
+        vm.assert_not_called()
+        client.load_image.assert_not_called()
+        self.assertEqual('image', client.start_build.call_args.args[1]['runtime'])
+        self.assertNotIn('require_native', client.start_build.call_args.args[1])
+        self.assertIsNone(backend.target(release['id']))
+        self.assertEqual('start', client.sandbox.call_args.args[-1])
+        disabled = Store(replace(settings, prebuilt_image_projects=()))
+        with self.assertRaisesRegex(Problem, 'not enabled'):
+            disabled.create_deployment(actor, project, spec, None)
+
+    def test_sandbox_pool_reservations_match_the_host_slice(self):
+        for memory, cpu, count in [(512, .5, 3), (256, .1, 8)]:
+            with self.subTest(memory=memory, cpu=cpu), tempfile.TemporaryDirectory() as state:
+                store = Store(Settings(Path(state)))
+                actor = store.authenticate(store.create_account('pool')['token'])
+                project = store.create_project(actor, 'app')['id']
+                store = Store(replace(store.settings, sandbox_projects=(project,), prebuilt_image_projects=(project,)))
+                spec = DeploymentInput(runtime='image', target='preview', memory_mb=memory, cpus=cpu).configuration()
+                for _ in range(count):
+                    release = store.create_deployment(actor, project, spec, None)
+                    with store.connection() as db:
+                        db.execute("UPDATE deployments SET state='ready' WHERE id=?", (release['id'],))
+                with self.assertRaisesRegex(Problem, 'Sandbox preview pool') as error:
+                    store.create_deployment(actor, project, spec, None)
+                self.assertEqual(429, error.exception.status)
 
     def test_preview_keeps_native_build_and_vm_runtime_independent(self):
         store = Store(Settings(self.root))

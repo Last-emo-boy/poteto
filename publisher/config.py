@@ -61,7 +61,7 @@ class Settings:
 
     def sandbox_enabled(self, project, config):
         return (project in self.sandbox_projects and config['target'] == 'preview'
-                and config['runtime'] in {'node', 'dockerfile'} and config['memory_mb'] >= 256
+                and config['runtime'] in {'node', 'dockerfile', 'image'} and config['memory_mb'] >= 256
                 and not any(config.get(k) for k in ('database_id', 'volume_id', 'migration_command', 'sleep')))
 
     @classmethod

@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from fastapi.testclient import TestClient
-from execution import host, prebuilt_image
+from execution import host, prebuilt_image, sandbox
 from publisher.api import create_app
 from publisher.cli_prebuilt import read_image
 from publisher.config import Settings
@@ -59,7 +59,27 @@ class PrebuiltImageTests(unittest.TestCase):
             spec, = json.load(data.extractfile("manifest.json"))
             self.assertEqual(["paas-release:" + RELEASE], spec["RepoTags"])
             self.assertEqual(LAYER, data.extractfile(spec["Layers"][0]).read())
-            self.assertEqual({spec["Config"], *spec["Layers"], "manifest.json"}, set(data.getnames()))
+            index = json.load(data.extractfile("index.json"))
+            descriptor, = index['manifests']
+            self.assertEqual('docker.io/library/paas-release:' + RELEASE,
+                             descriptor['annotations']['io.containerd.image.name'])
+            manifest = 'blobs/sha256/' + descriptor['digest'].split(':')[1]
+            self.assertEqual(descriptor['size'], data.getmember(manifest).size)
+            self.assertEqual({spec["Config"], *spec["Layers"], manifest, "manifest.json", "index.json", "oci-layout"}, set(data.getnames()))
+            self.assertEqual(['sha256:' + spec['Config'].split('/')[-1], descriptor['digest']],
+                             sandbox.image_identities(self.output, 'paas-release:' + RELEASE))
+
+    def test_duplicate_layers_are_validated_but_written_once(self):
+        config = {"os": "linux", "architecture": "amd64", "rootfs": {"type": "layers",
+                  "diff_ids": ["sha256:" + hashlib.sha256(LAYER).hexdigest()] * 2}}
+        self.source.write_bytes(archive({"config.json": json.dumps(config).encode(), "layer.tar": LAYER,
+                                        "manifest.json": b'[{"Config":"config.json","Layers":["layer.tar","layer.tar"]}]'}))
+        receipt = prebuilt_image.normalize(self.source, self.output, RELEASE)
+        self.assertEqual(2 * len(LAYER), receipt['image_disk_bytes'])
+        with tarfile.open(self.output) as image:
+            manifest, = json.load(image.extractfile('manifest.json'))
+            self.assertEqual(manifest['Layers'][0], manifest['Layers'][1])
+            self.assertEqual(len(image.getnames()), len(set(image.getnames())))
 
     def test_rejects_mismatched_platform_multiple_images_and_damaged_layers(self):
         for content, error in [

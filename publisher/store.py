@@ -360,15 +360,23 @@ class Store:
             return
         # A failed release can still own a running container. Its reservation is
         # released only after resource deletion, not when a health check fails.
-        rows = db.execute("SELECT p.account_id,d.config FROM deployments d JOIN projects p ON d.project_id=p.id WHERE d.id!=? AND d.runtime_driver IS NOT ? AND (d.state NOT IN ('failed','cancelled') OR d.backend_id IS NOT NULL)", (excluding, ARTIFACT_DRIVER)).fetchall()
+        rows = db.execute("SELECT p.account_id,d.config,d.runtime_driver FROM deployments d JOIN projects p ON d.project_id=p.id WHERE d.id!=? AND d.runtime_driver IS NOT ? AND (d.state NOT IN ('failed','cancelled') OR d.backend_id IS NOT NULL)", (excluding, ARTIFACT_DRIVER)).fetchall()
         total_memory = total_cpu = account_memory = account_cpu = 0
+        sandbox_memory = sandbox_cpu = 0
         for row in rows:
             current = json.loads(row["config"])
             total_memory += current["memory_mb"]
             total_cpu += current["cpus"]
+            if row['runtime_driver'] == SANDBOX_DRIVER:
+                sandbox_memory += current['memory_mb']
+                sandbox_cpu += current['cpus']
             if row["account_id"] == account_id:
                 account_memory += current["memory_mb"]
                 account_cpu += current["cpus"]
+        # Match the sandbox slice envelope, rather than over-reserving its parent limits.
+        if driver == SANDBOX_DRIVER and (sandbox_memory + config['memory_mb'] > 2048
+                                         or sandbox_cpu + config['cpus'] > 1.5):
+            raise Problem(429, "Sandbox preview pool capacity is reserved; remove an unused sandbox preview")
         resources = db.execute("SELECT p.account_id FROM data_resources r JOIN projects p ON r.project_id=p.id WHERE r.kind='database'").fetchall()
         for row in resources:
             total_memory += 256

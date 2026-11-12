@@ -1,4 +1,4 @@
-"""Normalize a single Docker-exported image before loading it into a tenant VM."""
+"""Normalize one Docker image for the isolated VM or gVisor runtime."""
 import gzip
 import hashlib
 import io
@@ -68,6 +68,13 @@ def add_bytes(archive, name, data):
     archive.addfile(info, io.BytesIO(data))
 
 
+def add_document(archive, value, media_type):
+    data = json.dumps(value, separators=(",", ":")).encode()
+    descriptor = {"mediaType": media_type, "digest": "sha256:" + hashlib.sha256(data).hexdigest(), "size": len(data)}
+    add_bytes(archive, "blobs/sha256/" + descriptor["digest"].split(":")[1], data)
+    return descriptor
+
+
 class LayerReader:
     """Expose only bounded metadata reads to tarfile; never extract a layer."""
     def __init__(self, stream, size):
@@ -134,9 +141,10 @@ def add_layer(archive, name, path, expected, limit, *, scratch):
             if "sha256:" + digest.hexdigest() != expected:
                 raise ImageError("Image layer does not match its configuration digest")
             validate_layer(staged, size)
-            info = tarfile.TarInfo(name)
-            info.size = size
-            archive.addfile(info, staged)
+            if name is not None:
+                info = tarfile.TarInfo(name)
+                info.size = size
+                archive.addfile(info, staged)
     return size
 
 
@@ -155,14 +163,31 @@ def normalize(source: Path, destination: Path, release_id: str):
             unpack(source, root, max_bytes=IMAGE_LIMIT, max_files=FILE_LIMIT, private=True)
             config, layers = inspect(root)
             config_data = config.read_bytes()
-            config_name = hashlib.sha256(config_data).hexdigest() + ".json"
-            names = []
+            config_digest = "sha256:" + hashlib.sha256(config_data).hexdigest()
+            config_name = "blobs/sha256/" + config_digest.split(":")[1]
+            names, descriptors, written = [], [], set()
             with tarfile.open(pending, mode="w") as archive:
                 add_bytes(archive, config_name, config_data)
-                for index, (path, digest) in enumerate(layers):
-                    name = f"layers/{index}/layer.tar"
-                    total += add_layer(archive, name, path, digest, IMAGE_LIMIT - total, scratch=root)
+                for path, digest in layers:
+                    name = "blobs/sha256/" + digest.split(":")[1]
+                    size = add_layer(archive, name if digest not in written else None,
+                                     path, digest, IMAGE_LIMIT - total, scratch=root)
+                    total += size
+                    written.add(digest)
                     names.append(name)
+                    descriptors.append({"mediaType": "application/vnd.docker.image.rootfs.diff.tar",
+                                        "digest": digest, "size": size})
+                manifest = add_document(archive, {
+                    "schemaVersion": 2, "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+                    "config": {"mediaType": "application/vnd.docker.container.image.v1+json",
+                               "digest": config_digest, "size": len(config_data)},
+                    "layers": descriptors,
+                }, "application/vnd.docker.distribution.manifest.v2+json")
+                manifest["annotations"] = {"io.containerd.image.name": "docker.io/library/" + image,
+                                           "org.opencontainers.image.ref.name": release_id}
+                add_bytes(archive, "oci-layout", b'{"imageLayoutVersion":"1.0.0"}')
+                add_bytes(archive, "index.json", json.dumps({"schemaVersion": 2,
+                          "mediaType": "application/vnd.oci.image.index.v1+json", "manifests": [manifest]}).encode())
                 add_bytes(archive, "manifest.json", json.dumps(
                     [{"Config": config_name, "Layers": names, "RepoTags": [image]}]).encode())
             pending.replace(destination)

@@ -1,4 +1,5 @@
-"""Opt-in, stateless gVisor previews from the trusted native builder."""
+"""Opt-in, stateless gVisor previews from native builds or normalized images."""
+import hashlib
 import http.client
 import json
 import math
@@ -67,12 +68,15 @@ def save(path, receipt):
 
 def image_identities(archive, tag):
     with tarfile.open(archive, mode="r:") as bundle:
-        def entry(name):
+        def content(name):
             member = bundle.getmember(name)
-            if not member.isfile() or not 0 < member.size <= 65536:
-                raise ValueError("Invalid native image manifest")
+            if not member.isfile() or not 0 < member.size <= 1024**2:
+                raise ValueError("Invalid sandbox image metadata")
             with bundle.extractfile(member) as source:
-                return json.load(source)
+                return source.read()
+
+        def entry(name):
+            return json.loads(content(name))
 
         manifest = entry("manifest.json")
         if not isinstance(manifest, list) or len(manifest) != 1 or manifest[0].get("RepoTags") != [tag]:
@@ -81,13 +85,17 @@ def image_identities(archive, tag):
         if not match:
             raise ValueError("Native build did not export a Docker image config")
         config = "sha256:" + match[1]
+        if hashlib.sha256(content(manifest[0]["Config"])).hexdigest() != match[1]:
+            raise ValueError("Sandbox image configuration digest does not match")
         # Docker's classic and containerd image stores report different IDs.
         # Both must refer to descriptors in this same single-platform export.
         index = entry("index.json")["manifests"]
         digest = index[0]["digest"] if len(index) == 1 else ""
-        if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest) or (
-                entry("blobs/sha256/" + digest.split(":", 1)[1])["config"]["digest"] != config):
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest):
             raise ValueError("Native build image descriptors do not match")
+        data = content("blobs/sha256/" + digest.split(":", 1)[1])
+        if hashlib.sha256(data).hexdigest() != digest.split(":", 1)[1] or json.loads(data)["config"]["digest"] != config:
+            raise ValueError("Sandbox image manifest digest does not match")
         return [config, digest]
 
 
@@ -173,9 +181,12 @@ def operation(root, config, release, body, build_status):
         spec = json.loads((build / "spec.json").read_text())
         image = "paas-release:" + release
         status = build_status(release)
-        if (spec.get("account_id"), spec.get("project_id"), status.get("driver"),
-                status.get("state"), status.get("image")) != (account, project, "native", "succeeded", image):
-            raise ValueError("Sandbox pilot requires an owned, trusted native build")
+        driver = status.get("driver")
+        source = ((driver == "native" and spec.get("runtime") in {"node", "dockerfile"})
+                  or (driver == "prebuilt" and spec.get("runtime") == "image"))
+        if not source or (spec.get("account_id"), spec.get("project_id"), status.get("state"),
+                          status.get("image")) != (account, project, "succeeded", image):
+            raise ValueError("Sandbox requires an owned, trusted native build or normalized prebuilt image")
         for command in (["systemctl", "is-active", "--quiet", "paas-sandbox-network.service"],
                         ["nft", "list", "table", "inet", "poteto_sandbox"]):
             subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
