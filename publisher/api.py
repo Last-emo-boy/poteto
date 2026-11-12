@@ -13,7 +13,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from publisher.archive import ArchiveError, unpack
 from publisher.config import Settings
 from publisher.http_limits import ControlLimits
-from publisher.models import DeploymentInput, EnvironmentInput, EnvironmentPatchInput, ProjectInput, ReleaseInput, TokenInput
+from publisher.models import PreflightInput, DeploymentInput, EnvironmentInput, EnvironmentPatchInput, ProjectInput, ReleaseInput, TokenInput
 from publisher.store import PREVIEW_SCOPE, SANDBOX_DRIVER, Problem, SCOPES, Store, encode, ident
 
 bearer = HTTPBearer(auto_error=False)
@@ -191,6 +191,11 @@ def create_app(settings=None):
     def patch_environment(project_id: str, body: EnvironmentPatchInput,
                           target: Literal["production", "preview"] = "production", user=Depends(actor)):
         return store.patch_environment(user, project_id, body.values, body.remove, target)
+
+    @app.post("/v1/projects/{project_id}/preflight", tags=["Deployments"])
+    def preflight(project_id: str, body: PreflightInput, user=Depends(actor)):
+        return store.preflight(user, project_id, body.configuration.configuration(),
+                               body.archive_bytes, body.unpacked_bytes, body.files)
 
     @app.post("/v1/projects/{project_id}/deployments", status_code=201, tags=["Deployments"])
     def create_deployment(project_id: str, body: DeploymentInput, request: Request, user=Depends(actor)):

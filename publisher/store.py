@@ -383,6 +383,42 @@ class Store:
         if total_memory + config["memory_mb"] > 20480 or total_cpu + config["cpus"] > 6:
             raise Problem(429, "Platform runtime capacity is reserved; retry after releases are removed")
 
+    def deployment_preconditions(self, db, actor, project, config):
+        project_id = project['id']
+        if config['runtime'] == 'image' and project_id not in self.settings.prebuilt_image_projects:
+            raise Problem(403, "Prebuilt image deployment is not enabled for this project")
+        account = self.check_concurrency(db, actor)
+        driver = None
+        if self.settings.artifact_enabled(project_id, config):
+            driver = ARTIFACT_DRIVER
+        elif self.settings.sandbox_enabled(project_id, config):
+            driver = SANDBOX_DRIVER
+        self.check_runtime_capacity(db, actor["account_id"], config, driver=driver)
+        from publisher.data_store import DataStore
+        environment = DataStore(self).bind_resources(db, project_id, config, self.environment(project, config['target']))
+        count = db.execute("SELECT count(*) FROM deployments WHERE project_id=?", (project_id,)).fetchone()[0]
+        if count >= 100:
+            raise Problem(429, "Release retention quota reached; delete unused releases")
+        return driver, environment, account
+
+    def preflight(self, actor, project_id, config, archive_bytes, unpacked_bytes, files):
+        with self.connection() as db:
+            project = self.project(db, actor, project_id, "deployments:write", allow_preview=config['target'] == 'preview')
+            upload_limit, unpack_limit, file_limit = self.settings.upload_limits(config['runtime'])
+            if archive_bytes > upload_limit or unpacked_bytes > unpack_limit or files > file_limit:
+                raise Problem(413, "Artifact exceeds this runtime's upload, expansion or file limit")
+            driver, _, account = self.deployment_preconditions(db, actor, project, config)
+            self.check_upload_capacity(db, config['runtime'])
+            used = self.storage_used(db, actor['account_id'])
+            if used + archive_bytes + unpacked_bytes > account['max_storage']:
+                raise Problem(429, "Artifact storage quota reached")
+            return {"ok": True, "project_id": project_id, "target": config['target'], "runtime_driver": driver,
+                    "upload": {"archive_bytes": archive_bytes, "unpacked_bytes": unpacked_bytes, "files": files,
+                               "limit_bytes": upload_limit, "expansion_limit_bytes": unpack_limit, "file_limit": file_limit},
+                    "storage": {"used_bytes": used, "limit_bytes": account['max_storage'],
+                                "remaining_after_upload": account['max_storage'] - used - archive_bytes - unpacked_bytes},
+                    "checked_at": time.time()}
+
     def create_deployment(self, actor, project_id, config, key):
         with self.connection() as db:
             preview = config['target'] == 'preview'
@@ -395,20 +431,7 @@ class Store:
                     if PREVIEW_SCOPE in actor['scopes'] and not old['preview_access']:
                         raise Problem(409, "Idempotency key is already in use")
                     return dict(old)|{'app_domain':project['app_domain']}
-            if config['runtime'] == 'image' and project_id not in self.settings.prebuilt_image_projects:
-                raise Problem(403, "Prebuilt image deployment is not enabled for this project")
-            self.check_concurrency(db, actor)
-            driver = None
-            if self.settings.artifact_enabled(project_id, config):
-                driver = ARTIFACT_DRIVER
-            elif self.settings.sandbox_enabled(project_id, config):
-                driver = SANDBOX_DRIVER
-            self.check_runtime_capacity(db, actor["account_id"], config, driver=driver)
-            from publisher.data_store import DataStore
-            environment = DataStore(self).bind_resources(db, project_id, config, self.environment(project, config['target']))
-            count = db.execute("SELECT count(*) FROM deployments WHERE project_id=?", (project_id,)).fetchone()[0]
-            if count >= 100:
-                raise Problem(429, "Release retention quota reached; delete unused releases")
+            driver, environment, _ = self.deployment_preconditions(db, actor, project, config)
             deployment_id, now = ident(), time.time()
             db.execute("INSERT INTO deployments(id,project_id,state,config,environment,idempotency_key,created,updated,preview_access,runtime_driver) VALUES(?,?,?,?,?,?,?,?,?,?)", (deployment_id, project_id, "uploading", encode(config), self.seal(environment), key, now, now, preview, driver))
             self.audit(db, actor, "deployment.create", deployment_id)
@@ -432,17 +455,20 @@ class Store:
             self.audit(db, actor, "environment.patch." + target, project_id)
         return {"keys": sorted(current), "applies_to": "new deployments"}
 
+    def check_upload_capacity(self, db, runtime):
+        upload_limit, _, _ = self.settings.upload_limits(runtime)
+        if shutil.disk_usage(self.settings.root).free < 1024**3 + upload_limit:
+            raise Problem(507, "Upload refused to preserve the platform's free disk reserve")
+        if db.execute("SELECT count(*) FROM uploads WHERE expires>=?", (time.time(),)).fetchone()[0] >= 4:
+            raise Problem(429, "Upload concurrency limit reached")
+
     def begin_upload(self, actor, deployment_id, upload_id):
         with self.connection() as db:
             deployment = self.deployment(db, actor, deployment_id, "deployments:write", allow_preview=True)
-            upload_limit, _, _ = self.settings.upload_limits(json.loads(deployment["config"])["runtime"])
-            if shutil.disk_usage(self.settings.root).free < 1024**3 + upload_limit:
-                raise Problem(507, "Upload refused to preserve the platform's free disk reserve")
             if deployment["state"] != "uploading":
                 raise Problem(409, "Deployment no longer accepts an upload")
             db.execute("DELETE FROM uploads WHERE expires<?", (time.time(),))
-            if db.execute("SELECT count(*) FROM uploads").fetchone()[0] >= 4:
-                raise Problem(429, "Upload concurrency limit reached")
+            self.check_upload_capacity(db, json.loads(deployment["config"])["runtime"])
             try:
                 db.execute("INSERT INTO uploads VALUES(?,?,?)", (deployment_id, upload_id, time.time() + 180))
             except sqlite3.IntegrityError:

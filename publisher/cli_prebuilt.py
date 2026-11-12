@@ -111,7 +111,7 @@ def read_prebuilt(directory: Path, *, production=False):
     report = {"ok": True, "directory": str(root), "origin": "prebuilt", "runtime": "static",
               "target": "production" if production else "preview",
               "build_command": None, "start_command": None, "public_directory": ".", "dockerfile": None,
-              "artifact": str(artifact), "upload_files": stats["files"], "upload_bytes": len(data)}
+              "artifact": str(artifact), "upload_files": stats["files"], "upload_bytes": len(data), "unpacked_bytes": stats["unpacked_bytes"]}
     return report, data
 
 
@@ -179,4 +179,4 @@ def read_image(directory: Path, artifact: Path, config: Path | None, credential_
     return {"ok": True, "directory": str(root), "origin": "prebuilt-image", "runtime": "image",
             "target": spec["target"], "build_command": None, "start_command": None, "dockerfile": None,
             "public_directory": None, "artifact": str(artifact.resolve()), "upload_files": stats["files"],
-            "upload_bytes": len(data), "configuration": spec}, data
+            "upload_bytes": len(data), "unpacked_bytes": stats["unpacked_bytes"], "configuration": spec}, data

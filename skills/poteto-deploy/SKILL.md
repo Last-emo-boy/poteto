@@ -31,16 +31,17 @@ irm https://poteto.iflink.tech/install.ps1 | iex
 
 ```sh
 poteto plan "$APP_DIR" --preview --json
+poteto plan "$APP_DIR" --remote --project "$PROJECT_ID" --preview --json
 poteto deploy "$APP_DIR" --project "$PROJECT_ID" --preview --url-only
 ```
 
-先确认 `plan` 返回 `ok: true`，检查 `runtime`、`public_directory` 和构建/启动命令；如果需要 `--config`，在两个命令上用同一个文件。确认是应用的目录或成品目录，而不是包含其他项目或私有文件的上层目录。预检不执行构建，也不需要登录。
+先确认 `plan` 返回 `ok: true`，检查 `runtime`、`public_directory` 和构建/启动命令；如果需要 `--config`，在两个命令上用同一个文件。确认是应用的目录或成品目录，而不是包含其他项目或私有文件的上层目录。本地预检不执行构建，也不需要登录。加 `--remote` 后使用当前凭据检查服务端权限、运行额度和数据绑定，只发送配置及大小，不上传文件或创建发布；被拒绝时先处理返回的问题，不继续上传。
 
 **静态站优先在本机或 CI 构建。** 对可信的 npm 项目，`poteto build` 会按锁文件安装依赖并执行项目的构建脚本。Vite 需要时在构建命令上加 `--preset vite`；其他静态 npm 项目可在 `poteto.json` 指定 `build_command` 和 `output_directory`。构建和预检不需要登录，不要把私密配置编进浏览器资产。
 
 ```sh
 poteto build "$APP_DIR"
-poteto plan "$APP_DIR" --prebuilt --preview --json
+poteto plan "$APP_DIR" --prebuilt --remote --project "$PROJECT_ID" --preview --json
 poteto deploy "$APP_DIR" --prebuilt --project "$PROJECT_ID" --preview --url-only
 ```
 

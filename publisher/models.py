@@ -64,6 +64,13 @@ class DeploymentInput(Input):
         return value
 
 
+class PreflightInput(Input):
+    configuration: DeploymentInput
+    archive_bytes: int = Field(gt=0)
+    unpacked_bytes: int = Field(gt=0)
+    files: int = Field(gt=0)
+
+
 class EnvironmentInput(Input):
     values: dict[str, str]
 

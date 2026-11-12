@@ -78,6 +78,9 @@ class PortableClientTests(unittest.TestCase):
             def do_POST(self):
                 if not self.authenticated(): return
                 body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path.endswith("/preflight"):
+                    self.respond(200,{"ok":True,"target":body["configuration"]["target"]})
+                    return
                 if body.get("target") == "production":
                     self.respond(403,{"error":"preview token"})
                     return
@@ -127,6 +130,9 @@ class PortableClientTests(unittest.TestCase):
                 with patch.dict(os.environ,env):
                     self.assertEqual(project,command("--url",origin,"link")["project_id"])
                     self.assertEqual([],command("ls"))
+                    planned = command("plan",".","--remote","--preview","--json")
+                    self.assertEqual("preview", planned["remote"]["target"])
+                    self.assertIsNone(state["archive"])
                     command("deploy",".","--preview","--no-wait")
                     self.assertEqual("preview",state["config"]["target"])
                     with tarfile.open(fileobj=io.BytesIO(state["archive"]),mode="r:gz") as archive:

@@ -209,18 +209,32 @@ def _credential_file(url):
     return None
 
 
-def _show_plan(args, credential_file):
+def _show_plan(args, credential_file, client=None, *, default_preview=False):
     try:
         if args.prebuilt_image:
-            report, _ = read_image(args.directory, args.prebuilt_image, args.config, credential_file, production=args.prod)
+            report, source = read_image(args.directory, args.prebuilt_image, args.config, credential_file, production=args.prod)
+            config = report["configuration"]
         elif args.prebuilt:
-            report, _ = read_prebuilt(args.directory, production=args.prod)
+            report, source = read_prebuilt(args.directory, production=args.prod)
+            config = {"runtime": "static", "target": report["target"]}
         else:
-            report = plan_deployment(args.directory, args.config, credential_file, preview=args.preview,
-                                     production=args.prod, preset=args.preset).summary()
-    except (PlanError, OSError) as error:
+            prepared = plan_deployment(args.directory, args.config, credential_file, preview=args.preview,
+                                       production=args.prod, preset=args.preset)
+            report, config = prepared.summary(), prepared.config
+            if client is not None:
+                source = pack(prepared.directory, files=prepared.files)
+                report.update(upload_bytes=len(source),
+                              unpacked_bytes=sum((prepared.directory / name).stat().st_size for name in prepared.files))
+        if client is not None:
+            config = config | {"target": config.get("target", "preview" if default_preview else "production")}
+            report["target"] = config["target"]
+            report["remote"] = client.request("POST", f"/v1/projects/{args.project}/preflight",
+                {"configuration": config, "archive_bytes": len(source),
+                 "unpacked_bytes": report["unpacked_bytes"], "files": report["upload_files"]})
+    except (RuntimeError, OSError) as error:
         if args.json:
-            code = error.code if isinstance(error, PlanError) else "unreadable_project"
+            code = (error.code if isinstance(error, PlanError) else
+                    "unreadable_project" if isinstance(error, OSError) else "remote_preflight_failed")
             print(json.dumps({"ok": False, "error": {"code": code, "message": str(error)}}, ensure_ascii=False))
             raise SystemExit(1) from None
         raise
@@ -234,6 +248,8 @@ def _show_plan(args, credential_file):
         if report[field] is not None:
             print(f"{label}: {report[field]}")
     print(f"Files to upload: {report['upload_files']}")
+    if client is not None:
+        print("Remote checks passed at " + client.url)
 
 
 def _environment_value(args):
@@ -290,6 +306,8 @@ def main(prog="poteto"):
         plan = commands.add_parser("plan", help="Inspect a deployment locally without logging in or uploading")
         plan.add_argument("directory", type=Path, nargs="?", default=Path("."))
         plan.add_argument("--config", type=Path, help="Deployment configuration JSON")
+        plan.add_argument("--remote", action="store_true", help="Check server permissions, quotas and bindings without deploying")
+        plan.add_argument("--project", help="Project to check remotely (defaults to the directory link or login)")
         plan.add_argument("--preset", choices=["nextjs", "vite"], help="Apply a framework's build and runtime defaults")
         artifact = plan.add_mutually_exclusive_group()
         artifact.add_argument("--prebuilt", action="store_true", help="Inspect the static artifact from poteto build")
@@ -423,7 +441,7 @@ def main(prog="poteto"):
         if args.command == "init":
             print(json.dumps(initialize(args.directory, args.runtime), indent=2, ensure_ascii=False))
             return
-        if args.command in {"build", "plan"}:
+        if args.command == "build" or (args.command == "plan" and not args.remote):
             token_file = os.environ.get("POTETO_TOKEN_FILE") or os.environ.get("PAAS_TOKEN_FILE") or default_token_file()
             if args.command == "build":
                 result = (package_image(args.directory, args.from_image, token_file) if args.from_image is not None
@@ -489,6 +507,10 @@ def main(prog="poteto"):
                 if not reference:
                     raise ValueError("This project has no production deployment")
             args.deployment = reference
+        if args.command == "plan":
+            _show_plan(args, token_file or default_token_file(), client,
+                       default_preview=bool(signed_in_project or linked_project))
+            return
         if args.command == "whoami":
             result = client.request("GET", "/v1/me")
         elif args.command == "link":
