@@ -65,15 +65,22 @@ class SandboxPreviewTests(unittest.TestCase):
 
     def test_image_receipt_accepts_only_the_expected_native_export_tag(self):
         tag = 'paas-release:' + self.release
-        payload = json.dumps([{'RepoTags': [tag], 'Config': 'blobs/sha256/' + 'e'*64}]).encode()
+        config, digest = 'sha256:' + 'e'*64, 'sha256:' + 'b'*64
+        entries = {
+            'manifest.json': [{'RepoTags': [tag], 'Config': 'blobs/sha256/' + 'e'*64}],
+            'index.json': {'manifests': [{'digest': digest}]},
+            'blobs/sha256/' + 'b'*64: {'config': {'digest': config}},
+        }
         archive = self.root / 'image.tar'
         with tarfile.open(archive, 'w') as tar:
-            info = tarfile.TarInfo('manifest.json')
-            info.size = len(payload)
-            tar.addfile(info, io.BytesIO(payload))
-        self.assertEqual('sha256:' + 'e'*64, sandbox.image_identity(archive, tag))
+            for name, value in entries.items():
+                payload = json.dumps(value).encode()
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                tar.addfile(info, io.BytesIO(payload))
+        self.assertEqual([config, digest], sandbox.image_identities(archive, tag))
         with self.assertRaisesRegex(ValueError, 'owned image tag'):
-            sandbox.image_identity(archive, 'paas-release:' + 'f'*24)
+            sandbox.image_identities(archive, 'paas-release:' + 'f'*24)
 
     def test_preview_keeps_native_build_and_vm_runtime_independent(self):
         store = Store(Settings(self.root))

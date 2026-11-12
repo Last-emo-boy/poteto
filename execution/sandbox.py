@@ -65,19 +65,30 @@ def save(path, receipt):
     pending.replace(path)
 
 
-def image_identity(archive, tag):
+def image_identities(archive, tag):
     with tarfile.open(archive, mode="r:") as bundle:
-        member = bundle.getmember("manifest.json")
-        if not member.isfile() or not 0 < member.size <= 65536:
-            raise ValueError("Invalid native image manifest")
-        with bundle.extractfile(member) as source:
-            manifest = json.load(source)
-    if not isinstance(manifest, list) or len(manifest) != 1 or manifest[0].get("RepoTags") != [tag]:
-        raise ValueError("Native build did not export exactly the owned image tag")
-    match = re.fullmatch(r"blobs/sha256/([a-f0-9]{64})", manifest[0].get("Config", ""))
-    if not match:
-        raise ValueError("Native build did not export a Docker image config")
-    return "sha256:" + match[1]
+        def entry(name):
+            member = bundle.getmember(name)
+            if not member.isfile() or not 0 < member.size <= 65536:
+                raise ValueError("Invalid native image manifest")
+            with bundle.extractfile(member) as source:
+                return json.load(source)
+
+        manifest = entry("manifest.json")
+        if not isinstance(manifest, list) or len(manifest) != 1 or manifest[0].get("RepoTags") != [tag]:
+            raise ValueError("Native build did not export exactly the owned image tag")
+        match = re.fullmatch(r"blobs/sha256/([a-f0-9]{64})", manifest[0].get("Config", ""))
+        if not match:
+            raise ValueError("Native build did not export a Docker image config")
+        config = "sha256:" + match[1]
+        # Docker's classic and containerd image stores report different IDs.
+        # Both must refer to descriptors in this same single-platform export.
+        index = entry("index.json")["manifests"]
+        digest = index[0]["digest"] if len(index) == 1 else ""
+        if not re.fullmatch(r"sha256:[a-f0-9]{64}", digest) or (
+                entry("blobs/sha256/" + digest.split(":", 1)[1])["config"]["digest"] != config):
+            raise ValueError("Native build image descriptors do not match")
+        return [config, digest]
 
 
 def has_tag(tag):
@@ -190,18 +201,24 @@ def operation(root, config, release, body, build_status):
         container = inspect("container", name)
         if container is None:
             archive_path = build / "image.tar"
-            if not receipt.get("image_id"):
-                if has_tag(image):
+            if not receipt.get("image_ids"):
+                previous = receipt.get("image_id")
+                if not previous and has_tag(image):
                     raise ValueError("Sandbox image tag is already in use")
-                receipt["image_id"] = image_identity(archive_path, image)
+                receipt["image_ids"] = image_identities(archive_path, image)
+                if previous and previous not in receipt["image_ids"]:
+                    raise ValueError("The existing image receipt does not match the native export")
+                receipt.pop("image_id", None)
                 save(path, receipt)
             if not has_tag(image):
                 with archive_path.open("rb") as archive:
                     docker("load", "-q", image=archive, timeout=180)
             metadata = json.loads(docker("image", "inspect", image))[0]
-            if metadata["Id"] != receipt["image_id"] or metadata["Config"].get("Volumes"):
-                raise ValueError("Sandbox preview requires its original image and no anonymous volumes")
-            create(name, receipt["image_id"], port, receipt["host_port"], memory, cpu, env, expected)
+            if metadata["Id"] not in receipt["image_ids"]:
+                raise ValueError("Sandbox preview image does not match its native export")
+            if metadata["Config"].get("Volumes"):
+                raise ValueError("Sandbox preview cannot create anonymous volumes")
+            create(name, metadata["Id"], port, receipt["host_port"], memory, cpu, env, expected)
             container = inspect("container", name)
         owned(container["Config"]["Labels"], expected)
         if not container["State"]["Running"]:
@@ -227,11 +244,16 @@ def operation(root, config, release, body, build_status):
     if network is not None:
         owned(network["Labels"], expected)
         docker("network", "rm", name)
-    if receipt.get("image_id"):
+    image_ids = receipt.get("image_ids")
+    if not image_ids and receipt.get("image_id"):
+        image_ids = image_identities(root / "builds" / release / "image.tar", "paas-release:" + release)
+        if receipt["image_id"] not in image_ids:
+            raise ValueError("The existing image receipt does not match the native export")
+    if image_ids:
         image = "paas-release:" + release
         if has_tag(image):
             effective = docker("image", "inspect", "--format", "{{.Id}}", image)
-            if effective != receipt["image_id"]:
+            if effective not in image_ids:
                 raise ValueError("Refusing to delete an image without an ownership receipt")
             docker("image", "rm", image)
     path.unlink()
