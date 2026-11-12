@@ -180,6 +180,28 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual('completed',job['state'])
             self.assertIsNone(job['deployment_id'])
 
+    def test_project_cleanup_keeps_the_application_domain_for_sandbox_route_removal(self):
+        release = self.queued({'target': 'preview'})
+        self.worker.run_once()
+        with self.store.connection() as db:
+            db.execute("UPDATE projects SET app_domain='legacy.test',preview_mode='isolated' WHERE id=?", (self.project,))
+            db.execute("UPDATE deployments SET runtime_driver='gvisor' WHERE id=?", (release['id'],))
+        adapter = Dokploy({'releases': str(self.backend.releases)}, self.store.settings)
+        removed = []
+
+        def remove(row):
+            removed.append(adapter.hostname(row))
+            self.assertEqual('isolated', row['preview_mode'])
+
+        self.backend.remove.side_effect = remove
+        operation = self.store.delete_project(self.actor, self.project)
+        self.assertTrue(self.worker.run_once())
+        self.assertEqual(['preview-' + release['id'] + '.legacy.test'], removed)
+        with self.store.connection() as db:
+            self.assertEqual('completed', db.execute('SELECT state FROM jobs WHERE id=?', (operation['job_id'],)).fetchone()[0])
+            self.assertEqual('deleted', db.execute('SELECT state FROM projects WHERE id=?', (self.project,)).fetchone()[0])
+            self.assertEqual(0, db.execute('SELECT count(*) FROM deployments WHERE project_id=?', (self.project,)).fetchone()[0])
+
     def test_interrupted_observation_requeues_same_job_without_resubmitting(self):
         release = self.queued()
         self.backend.config = {'execution_enabled': True}

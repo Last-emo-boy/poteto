@@ -227,7 +227,7 @@ class Worker:
         with self.store.connection() as db:
             self.guard(db)
             db.execute('UPDATE projects SET current_deployment=NULL WHERE id=?',(project_id,))
-            releases=[dict(r) for r in db.execute('SELECT * FROM deployments WHERE project_id=? ORDER BY created',(project_id,))]
+            releases=[dict(r) for r in db.execute('SELECT d.*,p.app_domain,p.preview_mode FROM deployments d JOIN projects p ON p.id=d.project_id WHERE d.project_id=? ORDER BY d.created',(project_id,))]
         for release in releases:
             self.check()
             if release['state']!='uploading':self.backend.remove(release)
