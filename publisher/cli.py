@@ -22,7 +22,7 @@ if __package__:
     from .cli_project import deployment_reference, find_link, unlink, write_link
     from .cli_prebuilt import build_local, package_image, read_image, read_prebuilt
     from .image_contract import UPLOAD_LIMIT as IMAGE_UPLOAD_LIMIT
-    from .login_contract import DEFAULT_URL, LOGIN_PATH
+    from .login_contract import DEFAULT_URL, LOGIN_PATH, PRODUCTION_SCOPES
     from .transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
     from . import cli_upload
     from . import cli_usage
@@ -31,7 +31,7 @@ else:
     from cli_tools import VERSION, PlanError, deployment_config, initialize, pack, plan_deployment
     from image_contract import UPLOAD_LIMIT as IMAGE_UPLOAD_LIMIT
     from cli_project import deployment_reference, find_link, unlink, write_link
-    from login_contract import DEFAULT_URL, LOGIN_PATH
+    from login_contract import DEFAULT_URL, LOGIN_PATH, PRODUCTION_SCOPES
     from transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
     import cli_upload
     import cli_usage
@@ -298,6 +298,8 @@ def main(prog="poteto"):
     sign_in.add_argument("--manage-data", action="store_true", help="Allow managing preview databases, never production data")
     sign_in.add_argument('--production', action='store_true', help='Authorize production publishing, rollback and release cleanup for your personal project')
     sign_in.add_argument('--manage-project', action='store_true', help='With --production, also manage project environments, data, backups and project deletion')
+    sign_in.add_argument('--manage-workspace', action='store_true', help='With --production, manage your own projects and issue project-scoped Agent/CI tokens')
+    sign_in.add_argument('--project', help='Select an existing project in your personal workspace')
     sign_out = commands.add_parser("logout", help="Revoke the credential issued by IF.Link login")
     sign_out.add_argument("--file", type=Path, default=default_token_file())
     init = commands.add_parser("init", help="Start a static, Node or Dockerfile preview project")
@@ -343,11 +345,13 @@ def main(prog="poteto"):
     prune.add_argument("--timeout", type=int, default=900)
     tokens = commands.add_parser("token")
     token_actions = tokens.add_subparsers(dest="token_action", required=True)
-    preview_token = token_actions.add_parser("create-preview", help="Issue a project-scoped publishing credential")
-    preview_token.add_argument("--project", required=True)
-    preview_token.add_argument("--name", required=True)
-    preview_token.add_argument("--expires-in-days", type=int, default=30)
-    preview_token.add_argument("--output", type=Path, required=True)
+    for action in ('create-preview', 'create-production'):
+        create_token = token_actions.add_parser(action, help='Issue a project-scoped publishing credential')
+        create_token.add_argument("--project", required=True)
+        create_token.add_argument("--name", required=True)
+        create_token.add_argument("--expires-in-days", type=int, default=30 if action=='create-preview' else 7)
+        create_token.add_argument("--output", type=Path, required=True)
+    token_actions.add_parser('list', help='List token metadata without exposing credentials')
     revoke = token_actions.add_parser("revoke")
     revoke.add_argument("token_id")
     job=commands.add_parser('job');job.add_argument('job_id')
@@ -499,7 +503,8 @@ def main(prog="poteto"):
         if args.command == "login":
             print(json.dumps(login(Client(args.url), args.output, manage_previews=args.manage_previews,
                                    manage_env=args.manage_env, allow_web=args.allow_web, manage_data=args.manage_data,
-                                   production=args.production, manage_project=args.manage_project), indent=2, ensure_ascii=False))
+                                   production=args.production, manage_project=args.manage_project,
+                                   manage_workspace=args.manage_workspace, project_id=args.project), indent=2, ensure_ascii=False))
             return
         if args.command == "logout":
             print(json.dumps(logout(Client, args.url, args.file), indent=2))
@@ -526,7 +531,10 @@ def main(prog="poteto"):
             if token:
                 account = client.request("GET", "/v1/me")
                 report.update({"project_ids": account["project_ids"], "scopes": account["scopes"]})
-                project = signed_in_project or (linked.project_id if linked and linked.url == client.url else None)
+                report['credential_scope'] = 'workspace' if account['project_ids'] is None else 'project'
+                if account.get('account'):
+                    report['project_limit'] = account['account']['max_projects']
+                project = (linked.project_id if linked and linked.url == client.url else None) or signed_in_project
                 if not project and account['project_ids'] and len(account['project_ids']) == 1:
                     project = account['project_ids'][0]
                 if project:
@@ -583,16 +591,20 @@ def main(prog="poteto"):
             client.request("GET", "/v1/projects/" + args.project + "/deployments")
             result = write_link(args.directory, client.url, args.project)
         elif args.command == "token":
-            if args.token_action == "create-preview":
+            if args.token_action in {'create-preview','create-production'}:
+                args.output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
                 with open(args.output,"x",opener=lambda path,flags:os.open(path,flags,0o600)) as out:
                     try:
-                        result=client.request("POST","/v1/tokens",{"name":args.name,"scopes":["deployments:preview"],
+                        result=client.request("POST","/v1/tokens",{"name":args.name,"scopes":PRODUCTION_SCOPES if args.token_action=='create-production' else ["deployments:preview"],
                             "project_ids":[args.project],"expires_in_days":args.expires_in_days})
-                        json.dump({"token":result.pop("token")},out);out.write("\n")
+                        json.dump({"token":result.pop("token"), 'poteto_url':client.url, 'project_id':args.project},out);out.write("\n")
                     except BaseException:
                         args.output.unlink(missing_ok=True)
                         raise
                 result["output"]=str(args.output)
+            elif args.token_action == 'list':
+                result=[row | {'scopes':json.loads(row['scopes']), 'projects':json.loads(row['projects']) if row['projects'] else None}
+                        for row in client.request('GET','/v1/tokens')]
             else:
                 client.request("DELETE","/v1/tokens/"+args.token_id)
                 result={"id":args.token_id,"revoked":True}

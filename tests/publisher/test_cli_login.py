@@ -237,7 +237,7 @@ class CliLoginTests(unittest.TestCase):
     def test_disabled_and_maintenance_preserve_the_existing_auth_boundary(self):
         with patch.dict(os.environ, {"PAAS_OIDC_CONFIG_FILE": ""}):
             self.assertEqual(401, TestClient(create_app(self.settings)).get(LOGIN_PATH).status_code)
-        self.assertEqual({"issuer": ISSUER, "client_id": "poteto-cli", "preview_management": True, "preview_environment": True, "web_egress": False, "preview_data": False, "production_publishing": False}, self.api.get(LOGIN_PATH).json())
+        self.assertEqual({"issuer": ISSUER, "client_id": "poteto-cli", "preview_management": True, "preview_environment": True, "web_egress": False, "preview_data": False, "production_publishing": False, "project_selection": False, "workspace_management": False}, self.api.get(LOGIN_PATH).json())
         self.assertEqual(401, self.api.post("/v1/projects", json={"name": "bad"}).status_code)
         self.assertEqual(401, self.api.delete(LOGIN_PATH).status_code)
         self.assertEqual(413, self.api.post(LOGIN_PATH, content=b"x" * 65537).status_code)

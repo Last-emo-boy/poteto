@@ -303,7 +303,12 @@ class Store:
                 raise Problem(401,"Invalid or expired platform token")
             if db.execute("SELECT count(*) FROM projects WHERE account_id=? AND state!='deleted'", (actor["account_id"],)).fetchone()[0] >= account["max_projects"]:
                 raise Problem(429, "Project quota reached")
-            return self.insert_project(db, actor, name)
+            project = self.insert_project(db, actor, name)
+            personal = db.execute("SELECT 1 FROM cli_identities i JOIN projects p ON p.id=i.project_id "
+                                  "WHERE p.account_id=? AND p.preview_mode='isolated'", (actor['account_id'],)).fetchone()
+            if personal:
+                db.execute("UPDATE projects SET preview_mode='isolated' WHERE id=?", (project['id'],))
+            return project
 
     def insert_project(self, db, actor, name):
         project_id = ident()
@@ -322,8 +327,9 @@ class Store:
         if bound is not None:
             return bound["project_id"]
         account_id = ident()
-        db.execute("INSERT INTO accounts(id,name,max_projects,max_concurrent,created) VALUES(?,?,1,1,?)",
-                   (account_id, "iflink-" + account_id, time.time()))
+        db.execute("INSERT INTO accounts(id,name,max_projects,max_concurrent,created) VALUES(?,?,?,1,?)",
+                   (account_id, "iflink-" + account_id,
+                    5 if self.settings.personal_previews and self.settings.personal_workspaces else 1, time.time()))
         actor = {"id": None, "account_id": account_id}
         self.audit(db, actor, "account.cli-enroll", account_id)
         project_id = self.insert_project(db, actor, "preview")["id"]

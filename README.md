@@ -38,6 +38,24 @@ Windows installs `poteto.cmd` in `%LOCALAPPDATA%\Programs\Poteto\bin` and adds i
 
 Run `poteto login` with your IF.Link account, or point `POTETO_TOKEN_FILE` at a project-scoped token file. On hosted Poteto, a first login creates a personal preview project unless the account is already linked. CLI login grants preview access to that project, not production access. Keep credentials out of prompts and upload directories. Windows login credentials use `%LOCALAPPDATA%\Poteto\token.json`; existing `~/.config/poteto/token.json` credentials remain usable.
 
+## Own several applications, delegate one at a time
+
+With personal workspaces enabled, use a separate owner credential on your computer:
+
+```sh
+poteto login --production --manage-workspace --output /secure/owner.json
+export POTETO_TOKEN_FILE=/secure/owner.json
+poteto projects --create my-app
+poteto projects
+poteto token create-preview --project PROJECT_ID --name my-agent --output /secure/agent.json
+```
+
+Give the Agent the private `agent.json` file through `POTETO_TOKEN_FILE`, not the owner credential or a token pasted into its prompt. The file binds the API and project automatically. The preview token cannot publish production, manage environment variables or data, create projects, or issue more tokens. For an explicitly approved production pipeline, use `token create-production` instead; it grants deployment operations for that project, including rollback and non-current release cleanup, but not environment, data or token management. `token list` shows metadata; `token revoke TOKEN_ID` revokes a selected credential. Issued tokens expire no later than the owner credential (IF.Link logins last seven days), even if a longer lifetime is requested. Logging out revokes that login, not independently issued Agent tokens.
+
+For direct work on another owned project, use `poteto login --project PROJECT_ID --output /secure/project.json`; add `--production` or `--production --manage-project` only for the permissions you need. The usual login still selects the original project. If you deleted that project, workspace login can list or create a replacement without creating another account; choose an active project explicitly for a deployment login.
+
+New workspace accounts allow five active projects with one concurrent deployment. All projects share the same account storage and runtime budget; additional projects do not reserve additional CPU or memory. Operators enable `personal_workspaces: true` alongside `personal_previews` and `personal_production` in the publisher runtime configuration. Existing accounts keep their stored limits. To adjust a specific account, controller root can run `python -m publisher.admin set-project-limit ACCOUNT_NAME --confirm-account ACCOUNT_ID --projects 5`. This changes only its project count; legacy linked projects retain operator-managed authorization.
+
 ## Link a directory once
 
 ```sh

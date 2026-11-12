@@ -9,7 +9,7 @@ description: 用 Poteto CLI 把现有应用目录预检并发布到 Poteto 的 H
 
 ## 安装与凭据
 
-如果没有可用的 Poteto 0.17.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
+如果没有可用的 Poteto 0.18.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
 
 ```sh
 curl -fsSL https://poteto.iflink.tech/install.sh | sh
@@ -24,8 +24,10 @@ irm https://poteto.iflink.tech/install.ps1 | iex
 默认可执行文件：macOS/Linux 为 `$HOME/.local/bin/poteto`；Windows 为 `$env:LOCALAPPDATA\Programs\Poteto\bin\poteto.cmd`，安装器会添加用户 PATH。运行 `poteto --version` 确认可用。
 
 - 用户可用 `poteto login` 在浏览器完成 IF.Link 登录。使用指定的凭据文件时，通过 `POTETO_TOKEN_FILE` 传入路径。不要索要或输出 token 内容，不要将凭据复制到上传目录。
-- 用 `poteto doctor` 核对项目和权限。仅接受有目标项目和所需环境权限的凭据；不要为自动化改用管理员凭据或自行扩大权限。使用项目级手动 token 时，部署命令加 `--project "$PROJECT_ID"`。IF.Link 登录凭据已绑定项目时可省略。
+- 用 `poteto doctor` 核对项目和权限。仅接受有目标项目和所需环境权限的凭据；不要为自动化改用管理员凭据或自行扩大权限。新版 `token create-preview` / `create-production` 生成的文件和 IF.Link 登录文件均绑定项目；旧的手动 token 需加 `--project "$PROJECT_ID"`。
 - 重复使用同一目录时，可运行 `poteto link "$APP_DIR" --project "$PROJECT_ID"` 保存项目与 API 地址；`.poteto/` 不保存 token，也不会上传。`poteto unlink "$APP_DIR"` 只解除本地绑定，不删除服务器项目。
+
+多项目用户应把工作区管理凭据留在自己电脑：用户用 `poteto login --production --manage-workspace --output /secure/owner.json` 登录后，可创建项目并用 `poteto token create-preview --project PROJECT_ID --name my-agent --output /secure/agent.json` 签发单项目凭据。Agent 使用后者；不要把 `credential_scope: "workspace"` 的凭据当作普通发布凭据。只有用户明确批准正式发布，才使用相应项目的 `create-production` 凭据。签发有效期不超过所有者当前凭据，`token list` / `token revoke ID` 可查看和撤销；不要为延长有效期自行重新授权。
 
 ## 预检 → 预览 → 验证
 

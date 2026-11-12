@@ -30,6 +30,7 @@ class Settings:
     sandbox_web: bool = False
     native_databases: bool = False
     personal_production: bool = False
+    personal_workspaces: bool = False
 
     def __post_init__(self):
         if not valid_domain(self.domain):
@@ -62,6 +63,8 @@ class Settings:
             raise ValueError('personal_previews must be a boolean')
         if type(self.personal_production) is not bool:
             raise ValueError('personal_production must be a boolean')
+        if type(self.personal_workspaces) is not bool:
+            raise ValueError('personal_workspaces must be a boolean')
         if type(self.sandbox_memory_limit_mib) is not int or not 256 <= self.sandbox_memory_limit_mib <= 16384:
             raise ValueError('sandbox_memory_limit_mib must be between 256 and 16384')
         if (type(self.sandbox_cpu_limit) not in (int, float) or not math.isfinite(self.sandbox_cpu_limit)
@@ -112,7 +115,8 @@ class Settings:
                    sandbox_cpu_limit=runtime.get('sandbox_cpu_limit', 1.5),
                    sandbox_web=runtime.get('sandbox_web', False),
                    native_databases=runtime.get('native_databases', False),
-                   personal_production=runtime.get('personal_production', False))
+                   personal_production=runtime.get('personal_production', False),
+                   personal_workspaces=runtime.get('personal_workspaces', False))
 
     @property
     def sandbox_limits(self):

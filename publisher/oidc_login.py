@@ -13,12 +13,11 @@ from urllib.request import Request, urlopen
 from fastapi import Depends
 import jwt
 from pydantic import Field
-from publisher.login_contract import ISSUER, LOGIN_PATH, REDIRECT_URI
+from publisher.login_contract import ISSUER, LOGIN_PATH, REDIRECT_URI, PRODUCTION_SCOPES
 from publisher.models import Input
 from publisher.store import PREVIEW_DATA_SCOPE, PREVIEW_ENV_SCOPE, PREVIEW_WEB_SCOPE, PREVIEW_MANAGE_SCOPE, PREVIEW_SCOPE, Problem
 
 LOGIN_ISSUE = "token.cli-login"
-PRODUCTION_SCOPES = ['projects:read', 'deployments:read', 'deployments:write']
 PROJECT_MANAGEMENT_SCOPES = ['projects:write', 'env:write', 'databases:write', 'storage:write',
                              'exports:write', 'imports:write']
 
@@ -33,6 +32,8 @@ class LoginExchange(Input):
     manage_data: bool = Field(default=False, strict=True)
     production: bool = Field(default=False, strict=True)
     manage_project: bool = Field(default=False, strict=True)
+    manage_workspace: bool = Field(default=False, strict=True)
+    project_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{24}$')
 
 
 def request_id_token(client_id, request):
@@ -87,12 +88,19 @@ class CliLogin:
             return {"issuer": ISSUER, "client_id": self.client_id, "preview_management": True,
                     "preview_environment": True, "web_egress": store.settings.sandbox_web,
                     "preview_data": store.settings.native_databases,
-                    "production_publishing": store.settings.personal_production and store.settings.personal_previews}
+                    "production_publishing": store.settings.personal_production and store.settings.personal_previews,
+                    'project_selection': store.settings.personal_workspaces and store.settings.personal_previews,
+                    'workspace_management': store.settings.personal_workspaces and store.settings.personal_production and store.settings.personal_previews}
 
         @app.post(LOGIN_PATH, status_code=201, tags=["Account"])
         def exchange(body: LoginExchange):
-            if body.manage_project and not body.production:
+            if (body.manage_project or body.manage_workspace) and not body.production:
                 raise Problem(422, 'Project management requires explicit production authorization')
+            if body.manage_project and body.manage_workspace:
+                raise Problem(422, 'Choose project or workspace management, not both')
+            if (body.manage_workspace or body.project_id is not None) and not (
+                    store.settings.personal_workspaces and store.settings.personal_previews):
+                raise Problem(503, 'Personal workspaces are not enabled')
             if body.production and any((body.manage_previews, body.manage_env, body.allow_web, body.manage_data)):
                 raise Problem(422, 'Keep preview-only login options separate from production authorization')
             if body.production and not (store.settings.personal_production and store.settings.personal_previews):
@@ -110,11 +118,25 @@ class CliLogin:
                 if project_id is None:
                     project_id = store.enroll_cli_identity(db, ISSUER, subject)
                 project = db.execute(
-                    "SELECT p.account_id,p.preview_mode FROM projects p JOIN accounts a ON a.id=p.account_id "
-                    "WHERE p.id=? AND p.state='active' AND a.enabled=1", (project_id,),
+                    "SELECT p.id,p.account_id,p.preview_mode,p.state FROM projects p JOIN accounts a ON a.id=p.account_id "
+                    "WHERE p.id=? AND a.enabled=1", (project_id,),
                 ).fetchone()
                 if project is None:
                     raise Problem(403, "The linked Poteto project is no longer available")
+                if (body.manage_workspace or body.project_id is not None) and project['preview_mode'] != 'isolated':
+                    raise Problem(403, 'This linked project requires its existing operator-issued authorization')
+                account_id = project['account_id']
+                if body.project_id is not None:
+                    project = db.execute("SELECT id,account_id,preview_mode,state FROM projects "
+                                         "WHERE id=? AND account_id=? AND state='active'",
+                                         (body.project_id,account_id)).fetchone()
+                    if project is None:
+                        raise Problem(404, 'The selected project is not available in this workspace')
+                    project_id = project['id']
+                if project['state'] != 'active':
+                    if not body.manage_workspace:
+                        raise Problem(403, 'Select an active project or use workspace management to create one')
+                    project_id = None
                 if body.production and project['preview_mode'] != 'isolated':
                     raise Problem(403, 'This linked project requires its existing operator-issued production authorization')
                 scopes = [PREVIEW_SCOPE]
@@ -128,9 +150,12 @@ class CliLogin:
                 if body.manage_data and not store.settings.native_databases:
                     raise Problem(503, "Preview data management is not enabled on this platform")
                 if body.production:
-                    scopes = PRODUCTION_SCOPES + (PROJECT_MANAGEMENT_SCOPES if body.manage_project else [])
-                grant = store.mint_token(db, {"id": None, "account_id": project["account_id"]},
-                                         name="Poteto CLI", scopes=scopes, project_ids=[project_id],
+                    scopes = PRODUCTION_SCOPES + (PROJECT_MANAGEMENT_SCOPES if body.manage_project or body.manage_workspace else [])
+                if body.manage_workspace:
+                    scopes = scopes + ['tokens:write']
+                grant = store.mint_token(db, {"id": None, "account_id": account_id},
+                                         name="Poteto workspace" if body.manage_workspace else "Poteto CLI",
+                                         scopes=scopes, project_ids=None if body.manage_workspace else [project_id],
                                          expires=time.time() + 7 * 86400, action=LOGIN_ISSUE)
             return grant | {"project_id": project_id}
 

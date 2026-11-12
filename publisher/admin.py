@@ -44,14 +44,42 @@ def set_storage_limit(store, name, account_id, mib):
     return {"account_id": account_id, "previous_bytes": row["max_storage"], "limit_bytes": size, "reserved_bytes": used}
 
 
+def set_project_limit(store, name, account_id, count):
+    if not isinstance(account_id, str) or not re.fullmatch(r'[a-f0-9]{24}', account_id):
+        raise ValueError('Confirm the exact account ID')
+    if type(count) is not int or not 1 <= count <= 100:
+        raise ValueError('Project limit must be between 1 and 100')
+    with store.connection() as db:
+        row=db.execute('SELECT max_projects FROM accounts WHERE name=? AND id=? AND enabled=1', (name,account_id)).fetchone()
+        if row is None:
+            raise ValueError('Account name and ID do not match an active account')
+        used=db.execute("SELECT count(*) FROM projects WHERE account_id=? AND state!='deleted'",(account_id,)).fetchone()[0]
+        if count < used:
+            raise ValueError('New project limit is below the number of active projects')
+        db.execute('UPDATE accounts SET max_projects=? WHERE id=?',(count,account_id))
+        store.audit(db, {'account_id':account_id,'id':None}, 'account.project-limit', account_id)
+    return {'account_id':account_id,'previous_limit':row['max_projects'],'project_limit':count,'active_projects':used}
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["create-account", "issue-owner-token", "retire-account", "set-storage-limit"])
+    parser.add_argument("command", choices=["create-account", "issue-owner-token", "retire-account", "set-storage-limit", 'set-project-limit'])
     parser.add_argument("name")
     parser.add_argument("--output", type=Path)
     parser.add_argument("--confirm-account", help="Exact account ID to confirm the administrative operation")
     parser.add_argument("--mib", type=int, help="Account artifact storage limit in MiB")
+    parser.add_argument('--projects', type=int, help='Maximum number of active projects')
     args = parser.parse_args()
+    if args.command == 'set-project-limit':
+        if os.geteuid()!=0 or not args.confirm_account or args.output or args.projects is None or args.mib is not None:
+            parser.error('set-project-limit requires controller root, --confirm-account ACCOUNT_ID and --projects N')
+        try:
+            print(json.dumps(set_project_limit(Store(Settings.from_env()), args.name, args.confirm_account, args.projects)))
+        except (ValueError,Problem) as error:
+            raise SystemExit(str(error)) from None
+        return
+    if args.projects is not None:
+        parser.error('--projects is only used with set-project-limit')
     if args.command == "set-storage-limit":
         if os.geteuid() != 0 or not args.confirm_account or args.output or args.mib is None:
             parser.error("set-storage-limit requires controller root, --confirm-account ACCOUNT_ID and --mib N")

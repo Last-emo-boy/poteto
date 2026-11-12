@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import secrets
+import re
 import sys
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -84,9 +85,13 @@ def authorize(client_id, *, timeout=180):
 
 
 def login(client, output, *, manage_previews=False, manage_env=False, allow_web=False, manage_data=False,
-          production=False, manage_project=False):
-    if manage_project and not production:
-        raise ValueError('--manage-project requires --production')
+          production=False, manage_project=False, manage_workspace=False, project_id=None):
+    if (manage_project or manage_workspace) and not production:
+        raise ValueError('Project or workspace management requires --production')
+    if manage_project and manage_workspace:
+        raise ValueError('Choose --manage-project or --manage-workspace, not both')
+    if project_id is not None and (not isinstance(project_id,str) or not re.fullmatch(r'[a-f0-9]{24}',project_id)):
+        raise ValueError('--project requires a 24-character project ID')
     if production and any((manage_previews, manage_env, allow_web, manage_data)):
         raise ValueError('Use a separate preview login; --production cannot expand preview-only login options')
     endpoint = urlsplit(client.url)
@@ -101,7 +106,8 @@ def login(client, output, *, manage_previews=False, manage_env=False, allow_web=
         raise RuntimeError("This endpoint does not offer Poteto login with IF.Link")
     for selected, capability in [(manage_previews, "preview_management"),
                                   (manage_env, "preview_environment"), (allow_web, "web_egress"),
-                                  (manage_data, "preview_data"), (production, 'production_publishing')]:
+                                  (manage_data, "preview_data"), (production, 'production_publishing'),
+                                  (manage_workspace, 'workspace_management'), (project_id is not None, 'project_selection')]:
         if selected and not config.get(capability):
             raise RuntimeError("This server does not support the requested login permission: " + capability)
     # Reserve the destination before authenticating or issuing a token.
@@ -109,9 +115,12 @@ def login(client, output, *, manage_previews=False, manage_env=False, allow_web=
         try:
             request = authorize(config["client_id"])
             for selected, name in [(manage_previews, "manage_previews"), (manage_env, "manage_env"), (allow_web, "allow_web"),
-                                   (manage_data, "manage_data"), (production, 'production'), (manage_project, 'manage_project')]:
+                                   (manage_data, "manage_data"), (production, 'production'), (manage_project, 'manage_project'),
+                                   (manage_workspace, 'manage_workspace')]:
                 if selected:
                     request[name] = True
+            if project_id is not None:
+                request['project_id'] = project_id
             result = client.request("POST", LOGIN_PATH, request)
             token = result.pop("token")
             json.dump({"token": token, "poteto_url": client.url, "project_id": result["project_id"]}, out)

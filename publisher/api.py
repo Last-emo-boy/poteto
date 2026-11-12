@@ -122,7 +122,13 @@ def create_app(settings=None):
         if scopes & PREVIEW_SCOPES and (
                 PREVIEW_SCOPE not in scopes or not scopes <= PREVIEW_SCOPES or not body.project_ids):
             raise Problem(422, "A preview token requires explicit project IDs and no other scopes")
-        if "*" not in user["scopes"] and not scopes <= set(user["scopes"]):
+        delegable = set(user['scopes'])
+        for broad, narrow in [('deployments:write', PREVIEW_SCOPE), ('deployments:write', PREVIEW_MANAGE_SCOPE),
+                              ('deployments:write', PREVIEW_WEB_SCOPE), ('env:write', PREVIEW_ENV_SCOPE),
+                              ('databases:write', PREVIEW_DATA_SCOPE)]:
+            if broad in delegable:
+                delegable.add(narrow)
+        if "*" not in delegable and not scopes <= delegable:
             raise Problem(403, "A token cannot grant more permissions than its issuer")
         if user["projects"] is not None and (body.project_ids is None or not set(body.project_ids) <= set(user["projects"])):
             raise Problem(403, "A token cannot broaden its project restriction")
