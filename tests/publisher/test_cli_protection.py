@@ -77,3 +77,11 @@ class ProtectionCliTests(unittest.TestCase):
              patch.object(cli,'Client') as client,redirect_stdout(out),patch('sys.stderr',io.StringIO()):
             with self.assertRaises(SystemExit) as result:cli.main()
         self.assertEqual(2,result.exception.code);client.assert_not_called()
+
+    def test_access_key_cannot_be_used_as_a_platform_login(self):
+        path=self.key_file();err=io.StringIO()
+        with patch('sys.argv',['poteto','whoami']),patch.object(cli,'find_link',return_value=None), \
+             patch.object(cli,'_credential_file',return_value=path),patch('sys.stderr',err):
+            with self.assertRaises(SystemExit) as result:cli.main()
+        self.assertEqual(1,result.exception.code)
+        self.assertIn('not a deployment credential',err.getvalue());self.assertNotIn(KEY,err.getvalue())

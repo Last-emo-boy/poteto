@@ -542,6 +542,8 @@ def main(prog="poteto"):
         if token_file:
             value = token_file.read_text(encoding="utf-8-sig").strip()
             stored = json.loads(value) if value.startswith("{") else {"token": value}
+            if 'access_key' in stored:
+                raise ValueError('This is a preview access key, not a deployment credential; use it with fetch --access-key-file')
             if "poteto_url" in stored:
                 if stored["poteto_url"] != args.url.rstrip("/"):
                     raise ValueError("This Poteto login file belongs to a different API")
