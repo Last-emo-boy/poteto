@@ -1,5 +1,5 @@
 {
-  "runtime": "image",
+  "runtime": "dockerfile",
   "health_check": "/api/healthz",
   "migration_command": "node migrate.mjs",
   "memory_mb": 512,

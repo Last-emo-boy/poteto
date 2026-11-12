@@ -21,11 +21,9 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker buildx build --platform linux/amd64 --load --tag "$source" fixtures/next-postgres
-docker image inspect "$source" --format '{{.Size}}' > "$out/uncompressed-image-bytes"
-docker image save --platform linux/amd64 "$source" | gzip -3 > "$out/image.tar.gz"
+poteto build fixtures/next-postgres > "$out/build.json"
+cp fixtures/next-postgres/.poteto/image.tar.gz "$out/image.tar.gz"
 wc -c < "$out/image.tar.gz" > "$out/compressed-image-bytes"
-echo "Image size: $(cat "$out/compressed-image-bytes") bytes compressed, $(cat "$out/uncompressed-image-bytes") bytes in Docker"
 # This must satisfy the real CLI contract before any runtime work starts.
 poteto plan fixtures/next-postgres --prebuilt-image "$out/image.tar.gz" --json > "$out/plan.json"
 python - "$out" "$nonce" <<'PY'
@@ -38,6 +36,8 @@ print(json.dumps(receipt))
 (root / 'image-receipt.json').write_text(json.dumps(receipt))
 PY
 docker image load --input "$out/normalized.tar"
+docker image inspect "$canonical" --format '{{.Size}}' > "$out/uncompressed-image-bytes"
+echo "Image size: $(cat "$out/compressed-image-bytes") bytes compressed, $(cat "$out/uncompressed-image-bytes") bytes in Docker"
 rm "$out/normalized.tar"
 docker network create "$network" >/dev/null
 password=$(python -c 'import secrets; print(secrets.token_urlsafe(24))')
