@@ -208,7 +208,7 @@ In the IF.Link login configuration pointed to by `PAAS_OIDC_CONFIG_FILE`, set `"
 
 On a provisioned executor, set `personal_previews: true` in both the publisher runtime configuration and the executor configuration. **New** IF.Link enrollments then receive an `isolated` personal project. Existing projects and releases retain their original mode. `poteto doctor` exposes the selected project's capabilities, and remote preflight returns the effective configuration.
 
-Personal projects accept locally built static output and prebuilt, stateless `linux/amd64` preview images. They do not run source builds, allocate databases/volumes, import production bundles, or silently fall back to a VM. Images default to 256 MiB, 0.1 vCPU and idle sleep; explicitly supplied resources and sleep settings are preserved. Outbound access is off unless both the token and deployment opt into web egress. Use an existing managed project for workloads requiring persistent data or production image deployment.
+Personal projects accept locally built static output and prebuilt `linux/amd64` preview images. With the native database provider below, images can also use preview PostgreSQL and migrations. They do not run source builds, allocate persistent volumes, import production bundles, or silently fall back to a VM. Images default to 256 MiB, 0.1 vCPU and idle sleep; explicitly supplied resources and sleep settings are preserved. Outbound access is off unless both the token and deployment opt into web egress. Production image deployment remains on existing managed projects.
 
 The shared pool has 64 private ingress slots. Its default remains 2 GiB / 1.5 vCPU. To change it, set the same `sandbox_memory_limit_mib` and `sandbox_cpu_limit` in publisher and executor configurations, and apply matching `MemoryMax`, `MemorySwapMax=0` and `CPUQuota` values to `paas-sandbox.slice`. The executor checks effective cgroup limits and stored reservations before admitting a personal preview. Keep headroom for the controller, existing tenant VMs and the host; do not size this pool from currently free RAM alone. The controller's persistent loopback filter and executor egress policy must allow `23000–23063` and the wake proxy at `23100`.
 
@@ -216,7 +216,35 @@ To enable web egress on an existing installation, deploy `execution/sandbox_netw
 
 A stopped preview retains its reservation so simultaneous wake-ups cannot overbook the pool. The per-project cleanup and usage commands help reclaim old reservations; a high project count does not imply that every project can run a large dynamic application concurrently.
 
-### Restore the stateless runtimes after a platform migration
+### Preview PostgreSQL without a tenant VM
+
+With server support enabled, request data permission explicitly at login, then create a preview database:
+
+```sh
+poteto login --manage-data
+poteto database create --stage preview
+poteto database list
+```
+
+Wait for the database to become `ready`. Set its ID as `database_id` in `poteto.json`; the platform injects `DATABASE_URL` only into the runtime and migration. A `migration_command`, such as `node migrate.mjs`, runs before application startup in a separate, bounded gVisor container with access only to that database. It runs once per release, with a 300-second deadline. A failed migration prevents publication; already committed database changes are not automatically undone. Use repeatable, backward-compatible migrations.
+
+Each database reserves 256 MiB, 0.25 vCPU and a 2 GiB disk. Applications can sleep while their database remains available. Deleting a preview does not delete its data; remove every bound release before explicitly running `poteto database delete DATABASE_ID --destroy-data`. Preview data permission is project-scoped and does not grant production access. A deployment-only token can deploy against an existing authorized binding but cannot create or delete databases.
+
+For operators: deploy the native database modules and `paas-native-databases.service`, and set `native_databases: true` in both publisher and executor configuration. Set executor `native_database_image` to a cached, trusted Linux/amd64 PostgreSQL 16 image ID. Enable the recovery service so owned databases restart before the wake proxy after a host reboot. Database reservations share the sandbox pool; do not increase capacity merely to bypass admission. Existing VM-backed databases keep their driver and data.
+
+### Move a preview and its database with an encrypted bundle
+
+```sh
+poteto export create PROJECT_ID --deployment PREVIEW_ID --recipient AGE_PUBLIC_KEY
+poteto export download EXPORT_ID --output /secure/preview.zip.age
+poteto import create EMPTY_PROJECT_ID /secure/preview.zip.age --identity /secure/age-key.txt --preview
+```
+
+The exporting credential needs preview environment permission and, for a bound database, preview data permission. Import into an empty personal preview project with those permissions. The encrypted bundle includes the image, preview environment and logical database dump, not production variables. Import creates a new database binding, restores its data and skips the already-applied migration. Keep the identity and bundle outside upload directories. Web egress still requires the importing credential's explicit permission.
+
+If an import fails after allocating resources, inspect its status before `poteto import delete IMPORT_ID --destroy-data`. This removes only that import's resources and leaves the project reusable. Retry the same cleanup after interruption; do not manually delete unrelated data.
+
+### Restore runtimes after a platform migration
 
 Platform snapshots include sandbox receipts, wake routing, pool units/overrides and normalized build archives, while the controller disk contains application configuration and credentials. On the restored host, provision Docker, gVisor and the Caddy/Sablier images first. After restoring the executor state and the controller, stop its workers, enter the maintenance barrier, and queue reconstruction from controller root:
 
@@ -226,6 +254,8 @@ python -m publisher.sandbox_restore --operation RESTORE_OPERATION_ID --all --app
 ```
 
 Use the same 24-character operation ID as the maintenance barrier, or select owned test releases with repeated `--deployment ID` instead of `--all`. Resume the workers and leave that barrier to process the existing deployment IDs through their normal readiness checks. Repeating the operation does not create duplicate reconstruction jobs. Review the returned job IDs and wait for readiness before restoring public traffic. These commands belong on the restored controller, never on an outbound-blocked audit clone connected to the live executor.
+
+Snapshots containing native databases use `ovh-paas-platform/3` with logical PostgreSQL dumps. On the restored host, with executor admission stopped and its trusted PostgreSQL image available, run `python -m execution.platform_restore restore-native RESTORE_OPERATION_ID` before reconstructing applications. It preserves the restored controller's resource IDs and credentials and refuses to overwrite an existing database. Reconstruction skips migrations whose schema is already in the snapshot. Older snapshots without native databases retain their existing restore path.
 
 ## Trusted native builds on Linux
 
