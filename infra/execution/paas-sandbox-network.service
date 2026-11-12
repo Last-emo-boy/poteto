@@ -1,0 +1,11 @@
+[Unit]
+Description=Poteto sandbox container network boundary
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/nft -f /opt/paas-execution/infra/execution/paas-sandbox.nft
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

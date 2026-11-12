@@ -14,7 +14,7 @@ from publisher.archive import ArchiveError, unpack
 from publisher.config import Settings
 from publisher.http_limits import ControlLimits
 from publisher.models import DeploymentInput, EnvironmentInput, EnvironmentPatchInput, ProjectInput, ReleaseInput, TokenInput
-from publisher.store import PREVIEW_SCOPE, Problem, SCOPES, Store, encode, ident
+from publisher.store import PREVIEW_SCOPE, SANDBOX_DRIVER, Problem, SCOPES, Store, encode, ident
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -70,6 +70,7 @@ def create_app(settings=None):
         config = json.loads(row["config"])
         preview = "https://" + settings.hostname(row["project_id"], row["id"],domain=row["app_domain"])
         return {"id": row["id"], "project_id": row["project_id"], "state": row["state"],
+                "runtime_driver": row.get("runtime_driver"),
                 "config": config, "created": row["created"], "updated": row["updated"],
                 "artifact_bytes": row["artifact_bytes"], "error": row["error"],
                 "url": preview if row["state"] == "ready" else None,
@@ -250,7 +251,8 @@ def create_app(settings=None):
             if not (settings.root / 'artifacts' / (deployment_id + '.tar.gz')).is_file():
                 raise Problem(409, 'Original source artifact is unavailable')
             store.check_concurrency(db, user)
-            store.check_runtime_capacity(db, user["account_id"], json.loads(row["config"]), excluding=deployment_id)
+            store.check_runtime_capacity(db, user["account_id"], json.loads(row["config"]), excluding=deployment_id,
+                                         driver=row["runtime_driver"])
             now, job_id = time.time(), ident()
             db.execute("UPDATE deployments SET state='queued',error=NULL,updated=? WHERE id=?", (now, deployment_id))
             db.execute("INSERT INTO jobs(id,project_id,kind,deployment_id,created,updated) VALUES(?,?,?,?,?,?)", (job_id,row['project_id'],'deploy',deployment_id,now,now))
@@ -363,6 +365,8 @@ def create_app(settings=None):
                 raise Problem(404, "Release does not belong to this project")
             if release["state"] != "ready":
                 raise Problem(409, "Only a healthy ready release can receive production traffic")
+            if release["runtime_driver"] == SANDBOX_DRIVER:
+                raise Problem(409, "The sandbox pilot is preview-only; redeploy to production on the established runtime")
             config=json.loads(release['config'])
             if config['target']=='preview' and (config.get('database_id') or config.get('volume_id')):
                 raise Problem(409,'Preview data cannot become production data; publish a production-target release instead')

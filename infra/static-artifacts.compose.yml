@@ -1,0 +1,24 @@
+services:
+  static:
+    image: nginx:1.28-alpine
+    container_name: poteto-static
+    entrypoint: [nginx, -g, "daemon off;"]
+    user: "101:101"
+    read_only: true
+    restart: unless-stopped
+    cpus: 0.5
+    mem_limit: 128m
+    pids_limit: 64
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    tmpfs: ["/tmp:rw,noexec,nosuid,size=16777216"]
+    volumes:
+      - ./static-artifacts-nginx.conf:/etc/nginx/nginx.conf:ro
+      - ${PAAS_DATA:-/var/lib/paas-publisher}/static-releases:/srv/releases:ro
+    networks: [edge]
+    labels:
+      traefik.enable: "false"
+networks:
+  edge:
+    external: true
+    name: dokploy-network

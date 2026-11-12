@@ -1,0 +1,238 @@
+"""Opt-in, stateless gVisor previews from the trusted native builder."""
+import http.client
+import json
+import math
+from pathlib import Path
+import re
+import socket
+import subprocess
+import tarfile
+
+RUNTIME = "io.containerd.runsc.v1"
+PORTS = range(23000, 23032)
+ID = re.compile(r"[a-f0-9]{24}")
+ENV = re.compile(r"[A-Z_][A-Z0-9_]{0,63}")
+
+
+def docker(*args, image=None, timeout=25):
+    result = subprocess.run(
+        ["/usr/bin/docker", "--host", "unix:///var/run/docker.sock", *args],
+        env={"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"},
+        stdin=image, capture_output=True, timeout=timeout,
+    )
+    if result.returncode:
+        raise ValueError("Sandbox Docker operation failed: " + args[0])
+    return result.stdout.decode(errors="replace").strip()
+
+
+def inspect(kind, name):
+    # The exact-name check avoids interpreting an arbitrary Docker error as absence.
+    if kind == "container":
+        names = docker("ps", "-a", "--filter", "name=^/" + name + "$", "--format", "{{.Names}}")
+    else:
+        names = docker("network", "ls", "--filter", "name=^" + name + "$", "--format", "{{.Name}}")
+    if name not in names.splitlines():
+        return None
+    return json.loads(docker(kind, "inspect", name))[0]
+
+
+def validate(spec):
+    memory, cpu, port, env = (spec.get(k) for k in ("memory_mb", "cpus", "port", "environment"))
+    if (type(memory) is not int or not 256 <= memory <= 1024
+            or type(cpu) not in (int, float) or not math.isfinite(cpu) or not 0.1 <= cpu <= 1
+            or type(port) is not int or not 1024 <= port <= 65535
+            or not isinstance(env, dict) or len(env) > 103
+            or not all(isinstance(k, str) and ENV.fullmatch(k) and isinstance(v, str)
+                       and len(v) <= 16384 and "\x00" not in v for k, v in env.items())):
+        raise ValueError("Invalid sandbox preview configuration (minimum memory: 256 MiB)")
+    return memory, cpu, port, env
+
+
+def labels(release, account, project):
+    return {"poteto.sandbox.release": release, "poteto.sandbox.account": account,
+            "poteto.sandbox.project": project}
+
+
+def owned(effective, expected):
+    if not all((effective or {}).get(k) == v for k, v in expected.items()):
+        raise ValueError("Sandbox resource ownership does not match")
+
+
+def save(path, receipt):
+    pending = path.with_suffix(".next")
+    pending.write_text(json.dumps(receipt))
+    pending.chmod(0o600)
+    pending.replace(path)
+
+
+def image_identity(archive, tag):
+    with tarfile.open(archive, mode="r:") as bundle:
+        member = bundle.getmember("manifest.json")
+        if not member.isfile() or not 0 < member.size <= 65536:
+            raise ValueError("Invalid native image manifest")
+        with bundle.extractfile(member) as source:
+            manifest = json.load(source)
+    if not isinstance(manifest, list) or len(manifest) != 1 or manifest[0].get("RepoTags") != [tag]:
+        raise ValueError("Native build did not export exactly the owned image tag")
+    match = re.fullmatch(r"blobs/sha256/([a-f0-9]{64})", manifest[0].get("Config", ""))
+    if not match:
+        raise ValueError("Native build did not export a Docker image config")
+    return "sha256:" + match[1]
+
+
+def has_tag(tag):
+    refs = docker("image", "ls", "--filter", "reference=" + tag, "--format", "{{.Repository}}:{{.Tag}}")
+    return tag in refs.splitlines()
+
+
+class DockerSocket(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect("/var/run/docker.sock")
+
+
+def create(name, image, port, host_port, memory, cpu, env, ownership):
+    key = f"{port}/tcp"
+    body = {
+        "Image": image, "User": "10001:10001", "Tty": True,
+        "Env": [k + "=" + v for k, v in env.items()],
+        "Labels": ownership, "ExposedPorts": {key: {}}, "Healthcheck": {"Test": ["NONE"]},
+        "HostConfig": {
+            "Runtime": RUNTIME, "CgroupParent": "paas-sandbox.slice", "NetworkMode": name,
+            "Dns": ["127.0.0.1"], "PortBindings": {key: [{"HostIp": "127.0.0.1", "HostPort": str(host_port)}]},
+            "ReadonlyRootfs": True, "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges"],
+            "Tmpfs": {"/tmp": "rw,noexec,nosuid,size=67108864"},
+            "NanoCpus": round(cpu * 10**9), "Memory": memory * 1024**2, "MemorySwap": memory * 1024**2,
+            "PidsLimit": 128, "LogConfig": {"Type": "local", "Config": {"max-size": "5m", "max-file": "2"}},
+        },
+        "NetworkingConfig": {"EndpointsConfig": {name: {}}},
+    }
+    conn = DockerSocket("localhost", timeout=25)
+    try:
+        conn.request("POST", "/containers/create?name=" + name, json.dumps(body).encode(),
+                     {"Content-Type": "application/json"})
+        response = conn.getresponse()
+        response.read(65536)
+        if response.status != 201:
+            raise ValueError("Docker did not create the sandbox container")
+    finally:
+        conn.close()
+
+
+def observe(container, spec):
+    limits = container["HostConfig"]
+    memory, cpu, port, _ = validate(spec)
+    if limits["Runtime"] != RUNTIME or not limits["ReadonlyRootfs"] or limits["Privileged"]:
+        raise ValueError("Effective sandbox configuration does not match")
+    bindings = container["NetworkSettings"]["Ports"].get(f"{port}/tcp", [])
+    if bindings != [{"HostIp": "127.0.0.1", "HostPort": str(spec["host_port"])}]:
+        raise ValueError("Sandbox ingress is not restricted to host loopback")
+    pid = container["State"]["Pid"]
+    entry = Path(f"/proc/{pid}/cgroup").read_text().strip().split("::", 1)[1]
+    if not entry.startswith("/paas.slice/paas-sandbox.slice/"):
+        raise ValueError("Sandbox is outside its host resource envelope")
+    group = Path("/sys/fs/cgroup") / entry.lstrip("/")
+    actual_cpu, period = map(int, (group / "cpu.max").read_text().split())
+    if (actual_cpu != round(cpu * period) or (group / "memory.max").read_text().strip() != str(memory * 1024**2)
+            or (group / "memory.swap.max").read_text().strip() != "0"
+            or (group / "pids.max").read_text().strip() != "128"):
+        raise ValueError("Sandbox resource limits were not enforced by the host")
+
+
+def operation(root, config, release, body, build_status):
+    account, project, action = (body.get(k) for k in ("account_id", "project_id", "action"))
+    if not all(isinstance(v, str) and ID.fullmatch(v) for v in (release, account, project)):
+        raise ValueError("Invalid sandbox ownership")
+    if action not in {"start", "inspect", "logs", "delete"}:
+        raise ValueError("Invalid sandbox operation")
+    records = root / "sandboxes"
+    records.mkdir(mode=0o700, exist_ok=True)
+    path = records / (release + ".json")
+    receipt = json.loads(path.read_text()) if path.exists() else None
+    if receipt and (receipt["account_id"], receipt["project_id"]) != (account, project):
+        raise ValueError("Sandbox does not belong to this project")
+    expected = labels(release, account, project)
+    name = "poteto-sbx-" + release
+    if action == "start":
+        if config.get("sandbox_projects", {}).get(project) != account:
+            raise ValueError("Project is not authorized for sandbox previews")
+        memory, cpu, port, env = validate(body)
+        build = root / "builds" / release
+        spec = json.loads((build / "spec.json").read_text())
+        image = "paas-release:" + release
+        status = build_status(release)
+        if (spec.get("account_id"), spec.get("project_id"), status.get("driver"),
+                status.get("state"), status.get("image")) != (account, project, "native", "succeeded", image):
+            raise ValueError("Sandbox pilot requires an owned, trusted native build")
+        for command in (["systemctl", "is-active", "--quiet", "paas-sandbox-network.service"],
+                        ["nft", "list", "table", "inet", "poteto_sandbox"]):
+            subprocess.run(command, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8)
+        if receipt is None:
+            used = {json.loads(p.read_text())["host_port"] for p in records.glob("*.json")}
+            host_port = next((v for v in PORTS if v not in used), None)
+            if host_port is None:
+                raise ValueError("No sandbox preview slot is available")
+            if inspect("container", name) or inspect("network", name):
+                raise ValueError("Sandbox name is already in use")
+            receipt = {"account_id": account, "project_id": project, "host_port": host_port}
+            save(path, receipt)
+        bridge = "psbx" + str(receipt["host_port"])
+        network = inspect("network", name)
+        flags = [item for k, v in expected.items() for item in ("--label", k + "=" + v)]
+        if network is None:
+            docker("network", "create", "--driver", "bridge", "--opt",
+                   "com.docker.network.bridge.name=" + bridge, *flags, name)
+        else:
+            owned(network["Labels"], expected)
+            if network["Options"].get("com.docker.network.bridge.name") != bridge:
+                raise ValueError("Sandbox is attached to an unexpected bridge")
+        container = inspect("container", name)
+        if container is None:
+            archive_path = build / "image.tar"
+            if not receipt.get("image_id"):
+                if has_tag(image):
+                    raise ValueError("Sandbox image tag is already in use")
+                receipt["image_id"] = image_identity(archive_path, image)
+                save(path, receipt)
+            if not has_tag(image):
+                with archive_path.open("rb") as archive:
+                    docker("load", "-q", image=archive, timeout=180)
+            metadata = json.loads(docker("image", "inspect", image))[0]
+            if metadata["Id"] != receipt["image_id"] or metadata["Config"].get("Volumes"):
+                raise ValueError("Sandbox preview requires its original image and no anonymous volumes")
+            create(name, receipt["image_id"], port, receipt["host_port"], memory, cpu, env, expected)
+            container = inspect("container", name)
+        owned(container["Config"]["Labels"], expected)
+        if not container["State"]["Running"]:
+            docker("start", name, timeout=45)
+        try:
+            observe(inspect("container", name), body | {"host_port": receipt["host_port"]})
+        except Exception:
+            docker("stop", "-t", "2", name)
+            raise
+        return {"http_port": receipt["host_port"]}
+    if receipt is None:
+        return {"container": None, "log": "", "deleted": True}
+    container = inspect("container", name)
+    if container is not None:
+        owned(container["Config"]["Labels"], expected)
+    if action == "inspect":
+        return {"container": {"State": {"Running": container["State"]["Running"]}} if container else None}
+    if action == "logs":
+        return {"log": docker("logs", "--tail", "200", name)[-65536:] if container else ""}
+    if container is not None:
+        docker("rm", "-f", name)
+    network = inspect("network", name)
+    if network is not None:
+        owned(network["Labels"], expected)
+        docker("network", "rm", name)
+    if receipt.get("image_id"):
+        image = "paas-release:" + release
+        if has_tag(image):
+            effective = docker("image", "inspect", "--format", "{{.Id}}", image)
+            if effective != receipt["image_id"]:
+                raise ValueError("Refusing to delete an image without an ownership receipt")
+            docker("image", "rm", image)
+    path.unlink()
+    return {"deleted": True}

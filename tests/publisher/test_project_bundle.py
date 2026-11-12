@@ -77,3 +77,11 @@ class BundleTests(unittest.TestCase):
             result.writestr('manifest.json',json.dumps(self.manifest));result.writestr('image.tar',b'nginx base')
             result.writestr('source.tar.gz',archive());result.writestr('nginx.conf',b'events {}')
         self.assertTrue(unpack_bundle(self.project,self.destination).legacy_static)
+
+    def test_prebuilt_static_bundle_needs_only_the_validated_source(self):
+        self.manifest.update(configuration={'runtime':'static'},resources=[],image='static-artifact')
+        with zipfile.ZipFile(self.project,'w') as result:
+            result.writestr('manifest.json',json.dumps(self.manifest))
+            result.writestr('source.tar.gz',archive())
+        self.assertTrue(unpack_bundle(self.project,self.destination).static_artifact)
+        self.assertEqual(['source.tar.gz'],[p.name for p in self.destination.iterdir()])

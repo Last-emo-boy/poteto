@@ -24,6 +24,8 @@ def encode(value):
 
 
 PREVIEW_SCOPE = "deployments:preview"
+ARTIFACT_DRIVER = "static-artifact"
+SANDBOX_DRIVER = "gvisor"
 SCOPES = {"projects:read", "projects:write", "deployments:read", "deployments:write", "env:write", "databases:write", "storage:write", "tokens:write", "exports:write", "imports:write", PREVIEW_SCOPE}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
@@ -51,6 +53,7 @@ CREATE TABLE IF NOT EXISTS deployments (
  config TEXT NOT NULL, environment TEXT NOT NULL, artifact_bytes INTEGER NOT NULL DEFAULT 0,
  unpacked_bytes INTEGER NOT NULL DEFAULT 0,
  error TEXT, backend_id TEXT, idempotency_key TEXT, created REAL NOT NULL, updated REAL NOT NULL,
+ runtime_driver TEXT,
  UNIQUE(project_id, idempotency_key));
 CREATE TABLE IF NOT EXISTS jobs (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), kind TEXT NOT NULL,
@@ -119,6 +122,8 @@ class Store:
                 db.execute("ALTER TABLE projects ADD COLUMN preview_environment TEXT")
             if 'preview_access' not in {r['name'] for r in db.execute('PRAGMA table_info(deployments)')}:
                 db.execute("ALTER TABLE deployments ADD COLUMN preview_access INTEGER NOT NULL DEFAULT 0")
+            if 'runtime_driver' not in {r['name'] for r in db.execute('PRAGMA table_info(deployments)')}:
+                db.execute("ALTER TABLE deployments ADD COLUMN runtime_driver TEXT")
             if 'app_domain' not in {r['name'] for r in db.execute('PRAGMA table_info(projects)')}:
                 db.execute("ALTER TABLE projects ADD COLUMN app_domain TEXT")
             db.execute('UPDATE projects SET app_domain=? WHERE app_domain IS NULL',(settings.domain,))
@@ -347,10 +352,12 @@ class Store:
         db.execute('DELETE FROM execution_targets WHERE deployment_id=?', (deployment_id,))
         db.execute('DELETE FROM deployments WHERE id=?', (deployment_id,))
 
-    def check_runtime_capacity(self, db, account_id, config, excluding=""):
+    def check_runtime_capacity(self, db, account_id, config, excluding="", *, driver=None):
+        if driver == ARTIFACT_DRIVER:
+            return
         # A failed release can still own a running container. Its reservation is
         # released only after resource deletion, not when a health check fails.
-        rows = db.execute("SELECT p.account_id,d.config FROM deployments d JOIN projects p ON d.project_id=p.id WHERE d.id!=? AND (d.state NOT IN ('failed','cancelled') OR d.backend_id IS NOT NULL)", (excluding,)).fetchall()
+        rows = db.execute("SELECT p.account_id,d.config FROM deployments d JOIN projects p ON d.project_id=p.id WHERE d.id!=? AND d.runtime_driver IS NOT ? AND (d.state NOT IN ('failed','cancelled') OR d.backend_id IS NOT NULL)", (excluding, ARTIFACT_DRIVER)).fetchall()
         total_memory = total_cpu = account_memory = account_cpu = 0
         for row in rows:
             current = json.loads(row["config"])
@@ -386,14 +393,19 @@ class Store:
                         raise Problem(409, "Idempotency key is already in use")
                     return dict(old)|{'app_domain':project['app_domain']}
             self.check_concurrency(db, actor)
-            self.check_runtime_capacity(db, actor["account_id"], config)
+            driver = None
+            if self.settings.artifact_enabled(project_id, config):
+                driver = ARTIFACT_DRIVER
+            elif self.settings.sandbox_enabled(project_id, config):
+                driver = SANDBOX_DRIVER
+            self.check_runtime_capacity(db, actor["account_id"], config, driver=driver)
             from publisher.data_store import DataStore
             environment = DataStore(self).bind_resources(db, project_id, config, self.environment(project, config['target']))
             count = db.execute("SELECT count(*) FROM deployments WHERE project_id=?", (project_id,)).fetchone()[0]
             if count >= 100:
                 raise Problem(429, "Release retention quota reached; delete unused releases")
             deployment_id, now = ident(), time.time()
-            db.execute("INSERT INTO deployments(id,project_id,state,config,environment,idempotency_key,created,updated,preview_access) VALUES(?,?,?,?,?,?,?,?,?)", (deployment_id, project_id, "uploading", encode(config), self.seal(environment), key, now, now, preview))
+            db.execute("INSERT INTO deployments(id,project_id,state,config,environment,idempotency_key,created,updated,preview_access,runtime_driver) VALUES(?,?,?,?,?,?,?,?,?,?)", (deployment_id, project_id, "uploading", encode(config), self.seal(environment), key, now, now, preview, driver))
             self.audit(db, actor, "deployment.create", deployment_id)
             return dict(db.execute("SELECT * FROM deployments WHERE id=?", (deployment_id,)).fetchone())|{'app_domain':project['app_domain']}
 

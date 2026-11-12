@@ -171,8 +171,11 @@ def execute(worker,job,release):
                 raise BackendError('Invalid age public recipient')
             source=store.settings.root/'artifacts'/(release['id']+'.tar.gz')
             if not source.is_file():raise BackendError('Published release source is unavailable')
-            target=backend.target(release['id']);account=project['account_id']
-            if target:
+            artifact_driver=release.get('runtime_driver')=='static-artifact'
+            target=None if artifact_driver else backend.target(release['id']);account=project['account_id']
+            if artifact_driver:
+                image='static-artifact'
+            elif target:
                 if target['account_id']!=account:raise BackendError('Release image ownership does not match')
                 image='paas-release:'+release['id']
             else:
@@ -194,10 +197,11 @@ def execute(worker,job,release):
                     with zipfile.ZipFile(BoundedOutput(process.stdin),'w') as bundle:
                         bundle.writestr('manifest.json',json.dumps(manifest,ensure_ascii=False))
                         bundle.write(source,'source.tar.gz')
-                        if config['runtime']=='static':bundle.write(Path(__file__).with_name('static-nginx.conf'),'nginx.conf')
-                        with bundle.open('image.tar','w',force_zip64=True) as out:
-                            if target:client.stream_export('GET','/v1/builds/'+release['id']+'/image',out,1024**3,worker.check,headers={'X-Paas-Account':account})
-                            else:legacy_image(image,out,worker.check)
+                        if not artifact_driver:
+                            if config['runtime']=='static':bundle.write(Path(__file__).with_name('static-nginx.conf'),'nginx.conf')
+                            with bundle.open('image.tar','w',force_zip64=True) as out:
+                                if target:client.stream_export('GET','/v1/builds/'+release['id']+'/image',out,1024**3,worker.check,headers={'X-Paas-Account':account})
+                                else:legacy_image(image,out,worker.check)
                         if resources:
                             client.bootstrap(account)
                             with bundle.open('data.zip','w',force_zip64=True) as out:

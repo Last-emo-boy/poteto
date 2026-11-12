@@ -18,7 +18,7 @@ import subprocess
 import sys
 import time
 
-from execution import native_build
+from execution import native_build, sandbox
 
 ROOT = Path(os.environ.get("PAAS_EXEC_ROOT", "/srv/ovh-paas-execution"))
 RESTORES = Path('/srv/ovh-paas-platform/restore')
@@ -821,6 +821,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.response(404, {"error": "Unknown execution operation"})
             resource_id = checked_id(parts[2])
             size = int(self.headers.get("Content-Length", "0"))
+            if parts[1] == "sandboxes":
+                if not 0 < size <= 400 * 1024:
+                    raise ValueError("Invalid sandbox request size")
+                self.connection.settimeout(15)
+                body = json.loads(self.rfile.read(size))
+                leases.enter_context(active_account(checked_id(body["account_id"])))
+                with lock("sandbox-placements"):
+                    config = json.loads((ROOT / "config.json").read_text())
+                    return self.response(200, sandbox.operation(ROOT, config, resource_id, body, status))
             if parts[1] == "runtimes":
                 if not 0 < size <= 4096:
                     raise ValueError("Invalid runtime request size")
@@ -832,6 +841,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             leases.enter_context(active_account(spec["account_id"]))
             if 'project_id' in spec:
                 checked_id(spec['project_id'])
+            require_native = spec.get('require_native', False)
+            if type(require_native) is not bool:
+                raise ValueError('Invalid native build requirement')
+            if require_native and not native_build.allowed(json.loads((ROOT / 'config.json').read_text()), spec):
+                raise ExecutionError('Sandbox preview requires a trusted native build')
             if spec.get('runtime')=='image-import':
                 reference=spec.get('image_reference')
                 if self.headers.get('Content-Type')!='application/x-tar' or not isinstance(reference,str) or not re.fullmatch(r'(?:paas-release:[a-f0-9]{24}|sha256:[a-f0-9]{64})',reference):
@@ -861,6 +875,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         config_path = ROOT / 'config.json'
                         config = json.loads(config_path.read_text()) if config_path.exists() else {}
                         driver = 'native' if native_build.allowed(config, spec) else 'vm'
+                        if require_native and driver != 'native':
+                            raise ExecutionError('Project is no longer authorized for native builds')
                         pending.replace(job / "source.tar.gz")
                         write_json(job / "spec.json", spec)
                         write_json(job / "status.json", {"id": resource_id, "state": "queued", "driver": driver})

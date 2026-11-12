@@ -15,7 +15,7 @@ from publisher.backend import BackendError, Dokploy
 from publisher.config import Settings
 from publisher.controlflow import Cancelled, LeaseLost, ObservationUnavailable
 from publisher.executor import ExecutionFailure
-from publisher.store import Store, ident
+from publisher.store import ARTIFACT_DRIVER, SANDBOX_DRIVER, Store, ident
 
 
 class Worker:
@@ -294,7 +294,19 @@ class Worker:
             self.state(deployment['id'], 'ready', error=None)
             return
         # Recover a submitted release without resubmitting or rebuilding a live Dokploy operation.
-        if deployment["backend_id"]:
+        artifact = deployment.get('runtime_driver') == ARTIFACT_DRIVER
+        sandbox = deployment.get('runtime_driver') == SANDBOX_DRIVER
+        if sandbox:
+            self.state(deployment['id'], 'building')
+            archive = self.store.settings.root / 'artifacts' / f"{deployment['id']}.tar.gz"
+            self.backend.publish_sandbox(deployment, archive, lambda text: self.log(deployment, text), self.check)
+            self.state(deployment['id'], 'deploying', backend_id=SANDBOX_DRIVER)
+        elif artifact:
+            self.log(deployment, 'Publishing prebuilt static files; no build or runtime VM')
+            archive = self.store.settings.root / 'artifacts' / f"{deployment['id']}.tar.gz"
+            self.backend.publish_artifact(deployment, archive, self.check)
+            self.state(deployment['id'], 'deploying', backend_id=ARTIFACT_DRIVER)
+        elif deployment["backend_id"]:
             self.log(deployment, "Reconciling the existing deployment after worker restart")
             self.backend.reconcile_release(deployment)
         else:
@@ -329,7 +341,7 @@ class Worker:
             self.backend.deploy(deployment, compose_id)
         self.state(deployment["id"], "deploying")
         self.backend.health(deployment, check=self.check)
-        if config["sleep"] and not self.backend.target(deployment["id"]):
+        if config["sleep"] and not artifact and not self.backend.target(deployment["id"]):
             self.backend.refresh_wake()
         self.log(deployment, "HTTP health check passed")
         self.backend.public_health(deployment, check=self.check)

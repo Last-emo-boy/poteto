@@ -114,6 +114,12 @@ Merge `"native_build_projects": {"PROJECT_ID": "OWNING_ACCOUNT_ID"}` into the ex
 
 Remove the pair to disable native builds. A queued native job that loses authorization fails rather than switching drivers. After jobs drain, the operator can remove the dedicated builder and its cache without touching application data.
 
+## VM-free previews
+
+Prebuilt static sites can be served by one shared Nginx service instead of a VM per tenant. On the publisher host, create a world-traversable `static-releases` directory under the publisher state directory and start `infra/static-artifacts.compose.yml` on the existing Dokploy network. Set `"static_artifacts": ["PROJECT_ID"]` (or `true` for all projects) in `/etc/paas-publisher-runtime.json` and reload the publisher services. Upload an `index.html` site or point `output_directory` at a prebuilt `dist/` with no build command. Static releases still support preview, promotion, rollback and source-only encrypted export. Existing releases retain their runtime.
+
+The experimental gVisor path is limited to stateless previews of trusted native builds. Install the [gVisor containerd shim](https://docs.docker.com/engine/daemon/alternative-runtimes/) on the executor, install the sandbox network unit, nftables rules and systemd slice from `infra/execution/`, and load the execution egress policy. Use the same trusted project ID in the publisher's `sandbox_projects` list and the executor's `sandbox_projects` project-to-account map. Sandbox containers have loopback-only ingress and no outbound access. Data bindings, sleep and production continue to use the existing runtime. If sandbox setup fails, the preview fails rather than running unsandboxed.
+
 ## Develop
 
 With Python 3.12 or newer and [uv](https://docs.astral.sh/uv/):

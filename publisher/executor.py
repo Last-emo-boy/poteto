@@ -122,6 +122,10 @@ class ExecutionClient:
     def action(self, account_id, release_id, action, **fields):
         return self.request('POST', '/v1/runtimes/' + account_id + '/releases/' + release_id, {'action': action} | fields)
 
+    def sandbox(self, release_id, account_id, project_id, action, **fields):
+        return self.request('POST', '/v1/sandboxes/' + release_id,
+                            fields | {'action': action, 'account_id': account_id, 'project_id': project_id})
+
     def data(self, account_id, resource_id, project_id, action, **fields):
         return self.request('POST','/v1/runtimes/'+account_id+'/data',
             {'action':action,'resource_id':resource_id,'project_id':project_id} | fields)

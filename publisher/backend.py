@@ -8,6 +8,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from publisher.container_logs import capture
+from publisher import static_artifacts
+from publisher.store import ARTIFACT_DRIVER, SANDBOX_DRIVER
 
 
 class BackendError(RuntimeError):
@@ -66,6 +68,10 @@ class Dokploy:
         return json.loads(self.docker("inspect", ids[0]))[0]
 
     def runtime_logs(self, deployment):
+        if deployment.get('runtime_driver') == ARTIFACT_DRIVER:
+            return 'Static artifact release: no application process or runtime logs.'
+        if deployment.get('runtime_driver') == SANDBOX_DRIVER:
+            return self.sandbox_action(deployment, 'logs')['log']
         target=self.target(deployment['id'])
         if target:
             return self.execution_client().action(target['account_id'],deployment['id'],'logs')['log']
@@ -162,22 +168,48 @@ class Dokploy:
     def reconcile_release(self, deployment):
         self.deploy(deployment, deployment['backend_id'])
 
+    def publish_artifact(self, deployment, archive, check):
+        static_artifacts.stage(self.settings, deployment, archive, check)
+        check()
+        self.write_route(deployment, static_artifacts.UPSTREAM)
+
+    def account(self, deployment):
+        with self.store.connection() as db:
+            return db.execute('SELECT account_id FROM projects WHERE id=?', (deployment['project_id'],)).fetchone()[0]
+
+    def sandbox_action(self, deployment, action, **fields):
+        return self.execution_client().sandbox(deployment['id'], self.account(deployment),
+                                               deployment['project_id'], action, **fields)
+
+    def publish_sandbox(self, deployment, archive, log, check):
+        config = json.loads(deployment['config'])
+        if not self.settings.sandbox_enabled(deployment['project_id'], config):
+            raise BackendError('This project is no longer enabled for sandbox previews')
+        self.build_image(deployment, config, archive, self.account(deployment), log, check, native_only=True)
+        port = config['port']
+        record = self.sandbox_action(deployment, 'start', port=port, memory_mb=config['memory_mb'],
+                                     cpus=config['cpus'], environment=self.runtime_environment(deployment, port))
+        check()
+        self.forward_route(deployment, record)
+        log('Started the preview in gVisor; no tenant runtime VM')
+
     def health(self, deployment, timeout=120, check=None):
         deadline = time.monotonic() + timeout
         path = json.loads(deployment["config"])["health_check"]
         host = self.hostname(deployment)
+        routed = deployment.get('runtime_driver') in {ARTIFACT_DRIVER, SANDBOX_DRIVER}
         last_status = None
         while time.monotonic() < deadline:
             if check:
                 check()
-            container = self.find_container(deployment["id"])
-            target = self.target(deployment['id'])
+            container = None if routed else self.find_container(deployment["id"])
+            target = None if routed else self.target(deployment['id'])
             if container and not container["State"]["Running"]:
                 if target:
                     self.execution_client().action(target['account_id'], deployment['id'], 'start')
                 else:
                     self.docker("start", container["Id"])
-            if container and container["State"]["Running"]:
+            if routed or (container and container["State"]["Running"]):
                 if target:
                     self.execution_client().action(target['account_id'], deployment['id'], 'reconcile')
                 connection = http.client.HTTPConnection("127.0.0.1", 80, timeout=5)
@@ -185,8 +217,9 @@ class Dokploy:
                     connection.request("GET", path, headers={"Host": host})
                     response = connection.getresponse()
                     last_status = response.status
-                    if 200 <= response.status < 300:
-                        return container
+                    if 200 <= response.status < 300 and (
+                            not routed or response.getheader('X-Paas-Deployment') == deployment['id']):
+                        return True if routed else container
                 except (OSError, http.client.HTTPException):
                     pass
                 finally:
@@ -195,6 +228,8 @@ class Dokploy:
         raise BackendError(f"Release failed its HTTP health check (last status: {last_status}); production traffic was not changed")
 
     def promote(self, deployment):
+        if deployment.get('runtime_driver') == SANDBOX_DRIVER:
+            raise BackendError('Sandbox previews cannot receive production traffic')
         if self.target(deployment['id']):
             return self.promote_remote(deployment)
         self.health(deployment)
@@ -266,6 +301,17 @@ class Dokploy:
         subprocess.run(["/usr/bin/python3", self.config.get("wake_script", "/opt/paas/scripts/configure-wakeup.py")], check=True, capture_output=True, timeout=30)
 
     def remove(self, deployment):
+        if deployment.get('runtime_driver') == ARTIFACT_DRIVER:
+            self.remove_preview_route(deployment['id'])
+            static_artifacts.remove(self.settings, deployment['id'])
+            return
+        if deployment.get('runtime_driver') == SANDBOX_DRIVER:
+            self.remove_preview_route(deployment['id'])
+            self.sandbox_action(deployment, 'delete')
+            client, account_id = self.execution_client(), self.account(deployment)
+            client.build_operation(account_id, deployment['id'], 'cancel')
+            client.build_operation(account_id, deployment['id'], 'delete')
+            return
         target = self.target(deployment['id'])
         if target:
             self.execution_client().build_operation(target['account_id'], deployment['id'], 'cancel')
@@ -290,9 +336,7 @@ class Dokploy:
             client.build_operation(target['account_id'], deployment['id'], 'delete')
         elif json.loads(deployment['config'])['sleep']:
             self.refresh_wake()
-        path = Path(self.config.get('routes', '/etc/dokploy/traefik/dynamic')) / ('publisher-preview-' + deployment['id'] + '.yml')
-        path.unlink(missing_ok=True)
-        path.with_suffix('.next').unlink(missing_ok=True)
+        self.remove_preview_route(deployment['id'])
         directory = self.releases / deployment['id']
         if directory.exists():
             shutil.rmtree(directory)
@@ -300,17 +344,28 @@ class Dokploy:
     def cancel(self, deployment):
         self.remove(deployment)
 
+    def remove_preview_route(self, deployment_id):
+        path = Path(self.config.get('routes', '/etc/dokploy/traefik/dynamic')) / ('publisher-preview-' + deployment_id + '.yml')
+        path.unlink(missing_ok=True)
+        path.with_suffix('.next').unlink(missing_ok=True)
+
     def remove_project_route(self, project_id):
         path=Path(self.config.get('routes','/etc/dokploy/traefik/dynamic'))/('publisher-'+project_id+'.yml')
         path.unlink(missing_ok=True);path.with_suffix('.next').unlink(missing_ok=True)
 
     def forward_route(self, deployment, target, production=False):
+        return self.write_route(deployment, f"http://10.201.0.2:{target['http_port']}", production,
+                                bind_release=deployment.get('runtime_driver') == SANDBOX_DRIVER)
+
+    def write_route(self, deployment, url, production=False, *, bind_release=False):
         project_id, deployment_id = deployment['project_id'], deployment['id']
         host = self.hostname(deployment,production)
         key = 'publisher-' + (project_id if production else 'preview-' + deployment_id)
         document = {'http': {'routers': {key: {'rule': f'Host(`{host}`)', 'entryPoints': ['web'], 'service': key, 'middlewares': [key]}},
-                    'services': {key: {'loadBalancer': {'servers': [{'url': f"http://10.201.0.2:{target['http_port']}"}]}}},
+                    'services': {key: {'loadBalancer': {'servers': [{'url': url}]}}},
                     'middlewares': {key: {'headers': {'customRequestHeaders': {'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': host}}}}}}
+        if bind_release:
+            document['http']['middlewares'][key]['headers']['customResponseHeaders'] = {'X-Paas-Deployment': deployment_id}
         path = Path(self.config.get('routes', '/etc/dokploy/traefik/dynamic')) / (key + '.yml')
         previous = path.read_bytes() if path.exists() else None
         pending = path.with_suffix('.next'); pending.write_text(json.dumps(document)); pending.replace(path)
@@ -345,16 +400,8 @@ class Dokploy:
             client.action(target['account_id'], deployment['id'], 'restore_alias', project_id=deployment['project_id'], target_release=previous)
             raise
 
-    def prepare_remote(self, deployment, archive, log, check=None, before_migrate=None, *, imported=None):
+    def build_image(self, deployment, config, archive, account_id, log, check, *, imported=None, native_only=False):
         from publisher.executor import BuildOutput
-        from publisher.runtime import RuntimeRegistry
-        config = json.loads(deployment['config'])
-        with self.store.connection() as db:
-            account_id = db.execute('SELECT account_id FROM projects WHERE id=?', (deployment['project_id'],)).fetchone()[0]
-        record = RuntimeRegistry(self).ensure(account_id)
-        with self.store.connection() as db:
-            db.execute('INSERT INTO execution_targets VALUES(?,?,?,?,?) ON CONFLICT(deployment_id) DO NOTHING',
-                       (deployment['id'], account_id, record['server_id'], record['http_port'], time.time()))
         client = self.execution_client()
         if check:
             check()
@@ -368,7 +415,11 @@ class Dokploy:
             build = {k:config[k] for k in ['runtime','build_command','start_command','output_directory','dockerfile'] if k in config}
             if imported and imported['image_path'] is not None:
                 build={'runtime':'image-import','image_reference':imported['reference']};archive=imported['image_path']
+            if native_only:
+                build['require_native'] = True
             status = client.start_build(deployment['id'], build | {'account_id': account_id, 'project_id': deployment['project_id']}, archive)
+        if native_only and status.get('driver') != 'native':
+            raise BackendError('Sandbox preview requires a trusted native build')
         driver = 'Native Docker' if status.get('driver') == 'native' else 'Isolated VM'
         log(driver + ' build job: ' + deployment['id'])
         output = BuildOutput(client, deployment['id'], log)
@@ -391,6 +442,23 @@ class Dokploy:
             raise BackendError(status.get('error', 'Isolated build failed'))
         if check:
             check()
+        return status
+
+    def runtime_environment(self, deployment, port):
+        return self.store.unseal(deployment['environment']) | {'PORT': str(port),
+            'PAAS_DEPLOYMENT_URL': 'https://' + self.hostname(deployment),
+            'PAAS_PROJECT_URL': 'https://' + self.hostname(deployment,production=True)}
+
+    def prepare_remote(self, deployment, archive, log, check=None, before_migrate=None, *, imported=None):
+        from publisher.runtime import RuntimeRegistry
+        config = json.loads(deployment['config'])
+        account_id = self.account(deployment)
+        record = RuntimeRegistry(self).ensure(account_id)
+        with self.store.connection() as db:
+            db.execute('INSERT INTO execution_targets VALUES(?,?,?,?,?) ON CONFLICT(deployment_id) DO NOTHING',
+                       (deployment['id'], account_id, record['server_id'], record['http_port'], time.time()))
+        status = self.build_image(deployment, config, archive, account_id, log, check, imported=imported)
+        client = self.execution_client()
         client.load_image(account_id, deployment['id'])
         from publisher.data_backend import DataBackend
         data = DataBackend(self)
@@ -399,9 +467,7 @@ class Dokploy:
                 before_migrate()
             data.migrate(deployment, account_id, check, log)
         port = 8080 if config['runtime'] == 'static' else config['port']
-        environment = self.store.unseal(deployment['environment']) | {'PORT': str(port),
-            'PAAS_DEPLOYMENT_URL': 'https://' + self.hostname(deployment),
-            'PAAS_PROJECT_URL': 'https://' + self.hostname(deployment,production=True)}
+        environment = self.runtime_environment(deployment, port)
         service = {'image': status['image'], 'pull_policy': 'never', 'user': '101:101' if config['runtime'] == 'static' else '10001:10001',
                    'read_only': config['runtime'] == 'static', 'init': True,
                    'environment': {k: v.replace('$', '$$') for k, v in environment.items()},

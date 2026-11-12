@@ -11,23 +11,22 @@ def main():
     config = json.loads(Path("/srv/ovh-paas-execution/config.json").read_text())
     uids = [pwd.getpwnam(name).pw_uid for name in ["paasbuild", *[f"paasrt{i}" for i in range(4)]]]
     uid_set = "{ " + ", ".join(str(uid) for uid in uids) + " }"
+    controller = pwd.getpwnam("paasvm").pw_uid
+    sandbox_ports = ", 23000-23031" if config.get("sandbox_projects") else ""
+    controller_rule = f'   meta skuid {controller} ip daddr 127.0.0.1 tcp dport {{ 21999, 22100-22103, 22200-22203{sandbox_ports} }} accept comment "publisher-execution-control"\n'
     rules = f'''destroy table inet ovh_paas_execution
  table inet ovh_paas_execution {{
   chain qemu_output {{
    type filter hook output priority -10; policy accept;
    meta skuid {uid_set} ct state established,related accept
-   meta skuid {uid_set} ip daddr {{ {PRIVATE}, {config['host_ipv4']}/32 }} counter reject
+{controller_rule}   meta skuid {uid_set} ip daddr {{ {PRIVATE}, {config['host_ipv4']}/32 }} counter reject
    meta skuid {uid_set} meta nfproto ipv6 counter reject
   }}
  }}
 '''
     subprocess.run(["nft", "-c", "-f", "-"], input=rules, text=True, check=True)
     subprocess.run(["nft", "-f", "-"], input=rules, text=True, check=True)
-    existing = subprocess.check_output(["nft", "list", "chain", "inet", "ovh_paas", "qemu_output"], text=True)
-    if 'publisher-execution-control' not in existing:
-        uid = pwd.getpwnam("paasvm").pw_uid
-        exception = f'insert rule inet ovh_paas qemu_output meta skuid {uid} ip daddr 127.0.0.1 tcp dport {{ 21999, 22100-22103, 22200-22203 }} accept comment "publisher-execution-control"\n'
-        subprocess.run(["nft", "-f", "-"], input=exception, text=True, check=True)
+
 
 
 if __name__ == "__main__":

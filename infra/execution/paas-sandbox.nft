@@ -1,0 +1,13 @@
+destroy table inet poteto_sandbox
+table inet poteto_sandbox {
+  chain input {
+    type filter hook input priority -20; policy accept;
+    iifname "psbx*" ct state established,related accept
+    iifname "psbx*" counter reject
+  }
+  chain forward {
+    type filter hook forward priority -20; policy accept;
+    iifname "psbx*" counter drop
+    oifname "psbx*" counter drop
+  }
+}

@@ -46,13 +46,17 @@ class Manifest(Input):
         for kind,rid in [('database',config.database_id),('volume',config.volume_id)]:
             if rid and (rid not in by_id or by_id[rid].kind!=kind or by_id[rid].stage!=config.target):
                 raise ValueError('Resource binding does not match the manifest')
-        if self.image!='paas-release:'+self.source_release and not self.legacy_static:
+        if self.image!='paas-release:'+self.source_release and not (self.legacy_static or self.static_artifact):
             raise ValueError('Invalid exported image identity')
         return self
 
     @property
     def legacy_static(self):
         return self.configuration.runtime=='static' and bool(re.fullmatch(r'sha256:[a-f0-9]{64}',self.image))
+
+    @property
+    def static_artifact(self):
+        return self.image == 'static-artifact' and self.configuration.runtime == 'static' and not self.configuration.build_command
 
 
 @contextmanager
@@ -106,8 +110,10 @@ def unpack_bundle(path,destination,*,source_stats=None):
         if not manifest or not 0<manifest.file_size<=256*1024:raise BundleError('Project manifest is absent or too large')
         try:value=Manifest.model_validate_json(archive.read(manifest))
         except ValidationError:raise BundleError('Project manifest does not match the supported format') from None
-        limits={'manifest.json':256*1024,'source.tar.gz':50*1024**2,'image.tar':1024**3}
-        if value.configuration.runtime=='static':limits['nginx.conf']=64*1024
+        limits={'manifest.json':256*1024,'source.tar.gz':50*1024**2}
+        if not value.static_artifact:
+            limits['image.tar']=1024**3
+            if value.configuration.runtime=='static':limits['nginx.conf']=64*1024
         if value.resources:limits['data.zip']=DATA_LIMIT+16*1024**2
         if entries.keys()!=limits.keys() or any(not 0<entries[name].file_size<=limit for name,limit in limits.items()):
             raise BundleError('Project bundle entries do not match the manifest and limits')

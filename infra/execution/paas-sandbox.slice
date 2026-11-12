@@ -1,0 +1,7 @@
+[Unit]
+Description=Poteto host sandbox resource envelope
+
+[Slice]
+CPUQuota=150%
+MemoryMax=2G
+MemorySwapMax=0

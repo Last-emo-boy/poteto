@@ -20,7 +20,7 @@ from publisher.data_backend import DataBackend
 from publisher.data_store import DataStore
 from publisher.models import Input
 from publisher.project_bundle import BUNDLE_LIMIT,DATA_LIMIT,ID,BundleError,open_zip,unpack_bundle
-from publisher.store import Problem,encode,ident
+from publisher.store import ARTIFACT_DRIVER,Problem,encode,ident
 from publisher.transfer_wire import CHUNK
 
 TTL=86400
@@ -236,7 +236,8 @@ def allocate(worker,job,row,manifest,account,source_size,expanded):
             release=dict(existing)
             if release['state']=='failed':
                 store.check_concurrency(db,{'account_id':account})
-                store.check_runtime_capacity(db,account,json.loads(release['config']),excluding=operation)
+                store.check_runtime_capacity(db,account,json.loads(release['config']),excluding=operation,
+                                             driver=release['runtime_driver'])
                 db.execute("UPDATE deployments SET state='building',error=NULL,updated=? WHERE id=?",(time.time(),operation))
                 release['state']='building';release['error']=None
             return release,json.loads(row['resource_map'])
@@ -250,10 +251,11 @@ def allocate(worker,job,row,manifest,account,source_size,expanded):
         mapping={r.id:data.allocate(db,account,project,r.kind,r.stage,import_id=operation) for r in manifest.resources}
         for field in ['database_id','volume_id']:
             if field in config:config[field]=mapping[config[field]]
-        store.check_runtime_capacity(db,account,config)
+        driver=ARTIFACT_DRIVER if manifest.static_artifact and store.settings.artifact_enabled(project,config) else None
+        store.check_runtime_capacity(db,account,config,driver=driver)
         now=time.time()
-        db.execute("INSERT INTO deployments(id,project_id,state,config,environment,artifact_bytes,unpacked_bytes,created,updated) VALUES(?,?,'building',?,?,?,?,?,?)",
-            (operation,project,encode(config),store.seal(manifest.release_environment),source_size,expanded,now,now))
+        db.execute("INSERT INTO deployments(id,project_id,state,config,environment,artifact_bytes,unpacked_bytes,created,updated,runtime_driver) VALUES(?,?,'building',?,?,?,?,?,?,?)",
+            (operation,project,encode(config),store.seal(manifest.release_environment),source_size,expanded,now,now,driver))
         db.execute('UPDATE jobs SET deployment_id=? WHERE id=?',(operation,operation))
         db.execute('UPDATE project_imports SET resource_map=? WHERE id=?',(encode(mapping),operation))
         return dict(db.execute('SELECT * FROM deployments WHERE id=?',(operation,)).fetchone()),mapping
@@ -284,7 +286,8 @@ def apply(worker,job,row,project,stage):
     manifest=unpack_bundle(plain,content,source_stats=stats);plain.unlink()
     if manifest.bundle_id!=row['bundle_id'] or {r.kind for r in manifest.resources}!=set(json.loads(row['kinds'])):
         raise BundleError('Bundle identity or declared resource permissions do not match')
-    if worker.backend.config.get('execution_enabled') is not True:raise BackendError('Project import requires isolated execution')
+    if worker.backend.config.get('execution_enabled') is not True and not (manifest.static_artifact and not manifest.resources):
+        raise BackendError('Project import requires isolated execution')
     source=content/'source.tar.gz'
     try:release,mapping=allocate(worker,job,row,manifest,account,source.stat().st_size,stats['unpacked_bytes'])
     except Problem as error:raise BackendError(error.message) from None
@@ -313,7 +316,7 @@ def apply(worker,job,row,project,stage):
         db.execute('UPDATE deployments SET environment=? WHERE id=?',(store.seal(env),operation))
         release=dict(db.execute('SELECT * FROM deployments WHERE id=?',(operation,)).fetchone())|{'app_domain':project['app_domain']}
     if release['state']!='ready':
-        worker.deploy(job,release,imported={'image_path':None if manifest.legacy_static else content/'image.tar','reference':manifest.image})
+        worker.deploy(job,release,imported={'image_path':None if manifest.legacy_static or manifest.static_artifact else content/'image.tar','reference':manifest.image})
     with store.connection() as db:
         worker.guard(db)
         db.execute('UPDATE projects SET environment=?,preview_environment=? WHERE id=?',
