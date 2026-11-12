@@ -86,7 +86,7 @@ class LocalImageBuildTests(unittest.TestCase):
              patch("publisher.cli_prebuilt.package_image", side_effect=self.package):
             report, _ = build_local(self.root, None, self.credential, production=True)
         args = run.call_args_list[0].args[0]
-        self.assertTrue(args[args.index("--file") + 1].endswith("docker files/app.Dockerfile"))
+        self.assertEqual(("docker files", "app.Dockerfile"), Path(args[args.index("--file") + 1]).parts[-2:])
         self.assertNotIn("shell", run.call_args_list[0].kwargs)
         self.assertEqual({"runtime": "image", "target": "production", "port": 8080}, report["configuration"])
 
