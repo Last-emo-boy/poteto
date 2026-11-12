@@ -73,6 +73,9 @@ CREATE TABLE IF NOT EXISTS preview_retention (
  updated REAL NOT NULL, checked_at REAL NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS preview_retention_runs (
  job_id TEXT PRIMARY KEY REFERENCES jobs(id), deployment_id TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS preview_protection (
+ project_id TEXT PRIMARY KEY REFERENCES projects(id), enabled INTEGER NOT NULL,
+ key_hash TEXT, revision TEXT NOT NULL, job_id TEXT NOT NULL REFERENCES jobs(id), updated REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS data_resources (
  id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id),
  kind TEXT NOT NULL, stage TEXT NOT NULL, state TEXT NOT NULL,
@@ -288,6 +291,8 @@ class Store:
             raise Problem(409,'A project snapshot is pending; observe its job before modifying the project')
         if scope.endswith(':write') and not allow_inactive and db.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind='project-import' AND state IN ('uploading','queued','running','failed','cancelling')",(project_id,)).fetchone():
             raise Problem(409,'Destination is reserved for import; finish, retry or discard the import before modifying it')
+        if scope.endswith(':write') and not allow_inactive and db.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind='project-protection' AND state IN ('queued','running','failed')",(project_id,)).fetchone():
+            raise Problem(409,'Finish or retry preview protection before modifying the project')
         return dict(row)
 
     def deployment(self, db, actor, deployment_id, scope="deployments:read", *, allow_preview=False):

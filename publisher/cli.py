@@ -26,6 +26,7 @@ if __package__:
     from .transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
     from . import cli_upload
     from . import cli_usage
+    from . import cli_protection
 else:
     from cli_login import default_token_file, login, logout
     from cli_tools import VERSION, PlanError, deployment_config, initialize, pack, plan_deployment
@@ -35,6 +36,7 @@ else:
     from transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
     import cli_upload
     import cli_usage
+    import cli_protection
 
 
 class Client:
@@ -353,6 +355,15 @@ def main(prog="poteto"):
             entry.add_argument('--older-than-days', type=int, default=7)
             entry.add_argument('--keep', type=int, default=3)
             entry.add_argument('--yes', action='store_true', help='Authorize this ongoing automatic deletion policy')
+    protection=commands.add_parser('protection',help='Manage separate access keys for private previews')
+    protection_actions=protection.add_subparsers(dest='protection_action',required=True)
+    for action in ('status','enable','rotate','disable','retry'):
+        entry=protection_actions.add_parser(action);entry.add_argument('--project')
+        if action in {'enable','rotate'}:entry.add_argument('--output',type=Path,required=True,help='Private .poteto-key file, never a deployment token')
+        if action!='status':
+            entry.add_argument('--no-wait',action='store_true');entry.add_argument('--timeout',type=int,default=900)
+    fetch=commands.add_parser('fetch',help='Read a preview with an optional separate access key; never forward it outside the preview origin')
+    fetch.add_argument('preview');fetch.add_argument('--path',default='/');fetch.add_argument('--access-key-file',type=Path)
     tokens = commands.add_parser("token")
     token_actions = tokens.add_subparsers(dest="token_action", required=True)
     for action in ('create-preview', 'create-production'):
@@ -468,6 +479,8 @@ def main(prog="poteto"):
     if args.command == 'retention' and args.retention_action == 'set':
         if not 1 <= args.keep <= 100 or not 1 <= args.older_than_days <= 3650:
             parser.error('Automatic retention requires --keep 1..100 and --older-than-days 1..3650')
+    if args.command == 'protection' and args.protection_action in {'enable','rotate'}:
+        if args.output.suffix!='.poteto-key':parser.error('Save preview access credentials in a .poteto-key file')
     if getattr(args, "resume", None) and any((args.local_build, args.prebuilt, args.prebuilt_image,
                                                args.preset, args.config, args.prod, args.preview)):
         parser.error("--resume reuses the saved artifact and target; omit build, configuration and target flags")
@@ -599,6 +612,10 @@ def main(prog="poteto"):
         elif args.command == 'retention':
             cli_usage.retention(client, args)
             return
+        elif args.command == 'protection':
+            result=cli_protection.configure(client,args)
+        elif args.command == 'fetch':
+            result=cli_protection.fetch(client,args.preview,args.path,args.access_key_file)
         elif args.command == "link":
             if not args.project:
                 parser.error("link requires --project PROJECT_ID when using a manual token")

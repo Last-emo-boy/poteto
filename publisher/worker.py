@@ -121,6 +121,10 @@ class Worker:
             elif job['kind']=='project-delete':
                 self.delete_project(job)
                 return True
+            elif job['kind']=='project-protection':
+                self.backend.protect_project(job['project_id'],self.check)
+                self.finish(job)
+                return True
             elif job['kind']=='project-export':
                 from publisher.project_exports import execute
                 execute(self,job,deployment)
@@ -276,6 +280,7 @@ class Worker:
             from publisher.project_imports import purge_project as purge_imports
             purge_imports(db,self.store,project_id)
             db.execute('DELETE FROM preview_retention WHERE project_id=?', (project_id,))
+            db.execute('DELETE FROM preview_protection WHERE project_id=?', (project_id,))
             # Keep only ownership for durable job receipts. Release the public
             # name/quota and erase mutable project secrets after actual cleanup.
             db.execute("UPDATE projects SET state='deleted',name=?,environment=?,preview_environment=NULL,current_deployment=NULL WHERE id=?",('~deleted:'+project_id,self.store.seal({}),project_id))

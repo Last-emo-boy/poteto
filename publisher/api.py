@@ -71,6 +71,8 @@ def create_app(settings=None):
     register_previews(app, store, actor)
     from publisher.preview_retention import register as register_retention
     register_retention(app, store, actor)
+    from publisher.preview_protection import register as register_protection
+    register_protection(app, store, actor)
 
     def release_view(row):
         config = json.loads(row["config"])
@@ -466,7 +468,7 @@ def create_app(settings=None):
                                   (user['account_id'], job_id)).fetchone():
                     raise Problem(404, 'Preview cleanup job not found')
                 scope = PREVIEW_MANAGE_SCOPE
-            if job['kind']=='project-delete':scope='projects:write'
+            if job['kind'] in {'project-delete','project-protection'}:scope='projects:write'
             if job['kind']=='project-export':
                 scope='exports:write'
                 if job['preview_access'] and PREVIEW_SCOPE in user['scopes']:

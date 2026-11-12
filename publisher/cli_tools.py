@@ -7,7 +7,7 @@ from pathlib import Path, PurePosixPath
 import subprocess
 import tarfile
 
-VERSION = "0.19.0"
+VERSION = "0.20.0"
 
 _PAGE = """<!doctype html>
 <html lang="en">
@@ -100,7 +100,7 @@ def upload_files(root: Path, credential_file: Path | None = None):
         directories[:] = sorted(d for d in directories if d not in excluded and not (Path(parent) / d).is_symlink())
         for name in sorted(filenames):
             file = Path(parent) / name
-            if name in excluded or name == ".env" or name.startswith(".env.") or file.is_symlink():
+            if name in excluded or name == ".env" or name.startswith(".env.") or name.endswith('.poteto-key') or file.is_symlink():
                 continue
             if credential is not None and file.resolve() == credential:
                 continue

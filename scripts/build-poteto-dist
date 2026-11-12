@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from publisher.cli_tools import VERSION
 
-MODULES = ("__init__.py", "cli.py", "cli_login.py", "cli_tools.py", "cli_project.py", "cli_upload.py", "cli_usage.py", "login_contract.py", "transfer_wire.py", "archive.py", "cli_prebuilt.py", "image_contract.py", "build_recipe.py")
+MODULES = ("__init__.py", "cli.py", "cli_login.py", "cli_tools.py", "cli_project.py", "cli_upload.py", "cli_usage.py", "cli_protection.py", "access_contract.py", "login_contract.py", "transfer_wire.py", "archive.py", "cli_prebuilt.py", "image_contract.py", "build_recipe.py")
 SKILL = Path("skills/poteto-deploy/SKILL.md")
 
 

@@ -21,6 +21,9 @@ def candidate(db, project, policy):
     if db.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind='project-import' "
                   "AND state IN ('uploading','queued','running','failed','cancelling')", (project['id'],)).fetchone():
         return None
+    if db.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind='project-protection' "
+                  "AND state IN ('queued','running','failed')", (project['id'],)).fetchone():
+        return None
     rows, published, _ = inventory(db, project['id'])
     keep, cutoff = selection(rows, project, published, policy)
     for row in reversed(rows):

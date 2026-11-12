@@ -128,6 +128,26 @@ Without `--yes`, `set` is a read-only preview. Enabling requires both `projects:
 
 These removals permanently delete the selected preview's runtime and artifact; there is no recovery bin. Persistent databases and volumes are never included. `status --json` shows the current candidates and recent job results. Disabling or tightening a policy takes effect before a queued job selects its release. A deletion already begun finishes through the existing crash-recovery path. Failed deletion remains visible and requires an explicit `prune --yes --ids ...` retry; the scheduler does not loop over it. Policies remain project settings after the enabling login expires. Project bundles do not copy retention settings; a new destination keeps its default disabled policy.
 
+## Share a private preview without sharing deployment credentials
+
+With a project-management credential, enable preview protection and save its separate access key:
+
+```sh
+poteto protection enable --output /secure/reviewer.poteto-key
+poteto protection status
+poteto fetch PREVIEW_URL --access-key-file /secure/reviewer.poteto-key
+poteto protection rotate --output /secure/new-reviewer.poteto-key
+poteto protection disable
+```
+
+Protection is off by default. It covers existing and future immutable preview URLs in the selected personal project; the stable production URL remains public. Wait for `protected: true` before sharing a confidential preview. A failed route update remains visible and blocks further project mutations until `protection retry` or `protection disable` succeeds. Static and gVisor personal projects on the separate app domain are supported; existing managed VM projects keep their routing contract.
+
+Share the `.poteto-key` file or its access key with reviewers, never a Poteto deployment token. A browser asks for the access key and receives a secure, HTTP-only, host-specific session lasting twelve hours. The access key remains valid for that project's previews until rotated or disabled. Rotation invalidates the old key and browser sessions on their next request. Credentials are removed before requests reach application code; application cookies and Authorization headers retain their normal meaning. `.poteto-key` files are excluded from uploads and local Docker build contexts, but keep them outside application directories and source control.
+
+`fetch` uses the authenticated deployment record to select the preview origin and returns a bounded text response. It preserves the key only across same-origin redirects, never sends the platform token to the application, and refuses a key file from another project or API. A reviewer who only has an access key can use the browser; `fetch` additionally requires the Agent's project-scoped deployment credential.
+
+Operators must deploy the matching API and worker before setting `preview_protection: true` in publisher runtime settings. `preview_access_url` in the backend config can override the internal API origin, which defaults to `http://172.18.0.1:18000`. Keep that API and application upstream ports private. The CDN must bypass caching for preview hosts and respect `Cache-Control: private, no-store`; do not add cache rules that ignore authentication or cookies. Disabling the platform feature flag stops new enable/rotate operations, not protection already applied to a project. Project exports do not copy protection keys or settings into another project.
+
 ## Runtime variables and redeploys
 
 ```sh

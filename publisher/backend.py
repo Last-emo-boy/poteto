@@ -301,7 +301,8 @@ class Dokploy:
                     self.execution_client().action(target['account_id'], deployment['id'], 'reconcile')
                 connection = http.client.HTTPConnection("127.0.0.1", 80, timeout=5)
                 try:
-                    connection.request("GET", path, headers={"Host": host})
+                    from publisher.preview_protection import probe_headers
+                    connection.request("GET", path, headers={"Host": host}|probe_headers(self,deployment,path))
                     response = connection.getresponse()
                     last_status = response.status
                     if 200 <= response.status < 300 and (
@@ -332,6 +333,9 @@ class Dokploy:
         # Override the upstream Host with the preview host, avoiding a recursive production route.
         preview = self.hostname(deployment)
         document["http"]["middlewares"]["publisher-host-" + project_id] = {"headers": {"customRequestHeaders": {"Host": preview}, "customResponseHeaders": {"X-Paas-Deployment": deployment["id"]}}}
+        from publisher.preview_protection import enabled
+        if deployment.get('runtime_driver') == ARTIFACT_DRIVER and enabled(self,project_id):
+            document['http']['services']['publisher-'+project_id]['loadBalancer']['servers'] = [{'url':static_artifacts.UPSTREAM}]
         if deployment.get('runtime_driver') == SANDBOX_DRIVER:
             target = self.sandbox_action(deployment, 'inspect')
             if type(target.get('http_port')) is not int:
@@ -404,7 +408,9 @@ class Dokploy:
             connection = (OriginHTTPSConnection(host, address, context) if ingress == "origin"
                           else http.client.HTTPSConnection(host, timeout=8))
             try:
-                connection.request("GET", path, headers={"User-Agent": "OVH-PaaS-Publisher/0.1"})
+                from publisher.preview_protection import probe_headers
+                extra=probe_headers(self,deployment,path) if not production else {}
+                connection.request("GET", path, headers={"User-Agent": "OVH-PaaS-Publisher/0.1"}|extra)
                 response = connection.getresponse()
                 if 200 <= response.status < 500 and response.getheader("X-Paas-Deployment") == deployment["id"]:
                     return
@@ -514,10 +520,55 @@ class Dokploy:
                     'middlewares': {key: {'headers': {'customRequestHeaders': {'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': host}}}}}}
         if bind_release:
             document['http']['middlewares'][key]['headers']['customResponseHeaders'] = {'X-Paas-Deployment': deployment_id}
+        if not production:
+            from publisher.preview_protection import decorate
+            decorate(self,deployment,document)
         path = Path(self.config.get('routes', '/etc/dokploy/traefik/dynamic')) / (key + '.yml')
         previous = path.read_bytes() if path.exists() else None
         pending = path.with_suffix('.next'); pending.write_text(json.dumps(document)); pending.replace(path)
         return path, previous
+
+    def protect_project(self, project_id, check):
+        from publisher.preview_protection import decorate, enabled
+        with self.store.connection() as db:
+            project=db.execute("SELECT * FROM projects WHERE id=? AND state='active'",(project_id,)).fetchone()
+            if project is None:raise BackendError('Protection project is no longer active')
+            releases=[dict(r) for r in db.execute('SELECT d.*,p.app_domain,p.preview_mode FROM deployments d JOIN projects p ON p.id=d.project_id WHERE d.project_id=?',(project_id,))]
+        protected=enabled(self,project_id)
+        current=next((r for r in releases if r['id']==project['current_deployment']),None)
+        root=Path(self.config.get('routes','/etc/dokploy/traefik/dynamic'))
+        production=root/('publisher-'+project_id+'.yml')
+        # Keep a public static production alias out of the private preview gate.
+        if protected and current and current['runtime_driver']==ARTIFACT_DRIVER and production.exists():
+            document=json.loads(production.read_text())
+            document['http']['services']['publisher-'+project_id]['loadBalancer']['servers']=[{'url':static_artifacts.UPSTREAM}]
+            pending=production.with_suffix('.next');pending.write_text(json.dumps(document));pending.replace(production)
+        changed=[]
+        for release in releases:
+            check()
+            path=root/('publisher-preview-'+release['id']+'.yml')
+            if not path.exists():continue
+            document=decorate(self,release,json.loads(path.read_text()))
+            pending=path.with_suffix('.next');pending.write_text(json.dumps(document));pending.replace(path)
+            changed.append(release)
+        for release in changed:
+            deadline=time.monotonic()+30
+            while time.monotonic()<deadline:
+                check()
+                connection=http.client.HTTPConnection('127.0.0.1',80,timeout=5)
+                try:
+                    connection.request('GET','/__paas_route_probe__',headers={'Host':self.hostname(release)})
+                    response=connection.getresponse()
+                    if protected:
+                        ready=response.status==401 and response.getheader('X-Poteto-Protection')=='enabled'
+                    else:
+                        ready=(200<=response.status<500 and response.getheader('X-Paas-Deployment')==release['id']
+                               and response.getheader('X-Poteto-Protection') is None)
+                    if ready:break
+                except (OSError,http.client.HTTPException):pass
+                finally:connection.close()
+                time.sleep(.5)
+            else:raise BackendError('Preview protection is not yet active at the gateway; retry its job')
 
     def promote_remote(self, deployment):
         self.health(deployment)
