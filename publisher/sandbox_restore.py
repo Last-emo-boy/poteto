@@ -49,7 +49,7 @@ def recover(store, operation, deployments, *, apply=False):
                     continue
                 row = selected[item['id']];now = time.time();job = ident()
                 db.execute("UPDATE deployments SET state='queued',error=NULL,updated=? WHERE id=?", (now,row['id']))
-                db.execute('INSERT INTO jobs(id,project_id,kind,deployment_id,created,updated) VALUES(?,?,?,?,?,?)',
+                db.execute('INSERT INTO jobs(id,project_id,kind,deployment_id,created,updated,skip_migration) VALUES(?,?,?,?,?,?,1)',
                            (job,row['project_id'],'deploy',row['id'],now,now))
                 account = db.execute('SELECT account_id FROM projects WHERE id=?',(row['project_id'],)).fetchone()[0]
                 store.audit(db, {'account_id':account,'id':None}, 'sandbox.restore', operation+':'+row['id'])

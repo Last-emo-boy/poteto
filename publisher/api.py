@@ -467,6 +467,12 @@ def create_app(settings=None):
                     from publisher.project_imports import lookup
                     lookup(db,store,user,job_id)
                     scope=PREVIEW_ENV_SCOPE
+            if job['kind']=='project-import-cleanup':
+                from publisher.project_imports import lookup
+                original=db.execute('SELECT id FROM project_imports WHERE cleanup_job=?',(job_id,)).fetchone()
+                if not original:raise Problem(404,'Import cleanup not found')
+                lookup(db,store,user,original['id'])
+                scope=PREVIEW_ENV_SCOPE if PREVIEW_SCOPE in user['scopes'] else 'imports:write'
             if job['kind'].startswith(('database-', 'volume-')):
                 from publisher.data_store import DataStore
                 scope = DataStore.scope(job['kind'].split('-')[0])

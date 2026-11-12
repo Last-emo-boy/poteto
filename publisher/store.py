@@ -128,12 +128,16 @@ class Store:
                 db.execute('ALTER TABLE jobs ADD COLUMN resource_id TEXT REFERENCES data_resources(id)')
             if 'preview_access' not in {r['name'] for r in db.execute('PRAGMA table_info(jobs)')}:
                 db.execute('ALTER TABLE jobs ADD COLUMN preview_access INTEGER NOT NULL DEFAULT 0')
+            if 'skip_migration' not in {r['name'] for r in db.execute('PRAGMA table_info(jobs)')}:
+                db.execute('ALTER TABLE jobs ADD COLUMN skip_migration INTEGER NOT NULL DEFAULT 0')
             if 'runtime_driver' not in {r['name'] for r in db.execute('PRAGMA table_info(data_resources)')}:
                 db.execute('ALTER TABLE data_resources ADD COLUMN runtime_driver TEXT')
             if 'destination_target' not in {r['name'] for r in db.execute('PRAGMA table_info(project_imports)')}:
                 db.execute("ALTER TABLE project_imports ADD COLUMN destination_target TEXT NOT NULL DEFAULT 'production'")
             if 'web_access' not in {r['name'] for r in db.execute('PRAGMA table_info(project_imports)')}:
                 db.execute('ALTER TABLE project_imports ADD COLUMN web_access INTEGER NOT NULL DEFAULT 0')
+            if 'cleanup_job' not in {r['name'] for r in db.execute('PRAGMA table_info(project_imports)')}:
+                db.execute('ALTER TABLE project_imports ADD COLUMN cleanup_job TEXT REFERENCES jobs(id)')
             if 'state' not in {r['name'] for r in db.execute('PRAGMA table_info(projects)')}:
                 db.execute("ALTER TABLE projects ADD COLUMN state TEXT NOT NULL DEFAULT 'active'")
             if 'preview_environment' not in {r['name'] for r in db.execute('PRAGMA table_info(projects)')}:
@@ -276,7 +280,7 @@ class Store:
             raise Problem(409,'Project deletion is in progress; observe its job or repeat DELETE to resume failed cleanup')
         if scope.endswith(':write') and not allow_inactive and db.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind='project-export' AND state IN ('queued','running')",(project_id,)).fetchone():
             raise Problem(409,'A project snapshot is pending; observe its job before modifying the project')
-        if scope.endswith(':write') and not allow_inactive and db.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind='project-import' AND state IN ('uploading','queued','running','failed')",(project_id,)).fetchone():
+        if scope.endswith(':write') and not allow_inactive and db.execute("SELECT 1 FROM jobs WHERE project_id=? AND kind='project-import' AND state IN ('uploading','queued','running','failed','cancelling')",(project_id,)).fetchone():
             raise Problem(409,'Destination is reserved for import; finish, retry or discard the import before modifying it')
         return dict(row)
 

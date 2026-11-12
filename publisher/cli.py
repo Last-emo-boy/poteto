@@ -381,6 +381,9 @@ def main(prog="poteto"):
             entry.add_argument('bundle',type=Path);entry.add_argument('--identity',type=Path,required=True)
             entry.add_argument('--age',default=os.environ.get('PAAS_AGE','age'));entry.add_argument('--no-wait',action='store_true')
             entry.add_argument('--preview',action='store_true',help='Restore only preview configuration and data into an empty personal project')
+        if action=='delete':
+            entry.add_argument('--destroy-data',action='store_true',help='Delete only the resources created by this failed import')
+            entry.add_argument('--no-wait',action='store_true')
     deploy = commands.add_parser("deploy")
     deploy.add_argument("directory", type=Path, nargs="?", default=Path("."))
     deploy.add_argument("--project", help="Project ID (defaults to the project from poteto login)")
@@ -626,7 +629,11 @@ def main(prog="poteto"):
                                             **({'target':'preview'} if args.preview else {}))
             else:
                 path='/v1/imports/'+args.target
+                if args.import_action=='delete' and args.destroy_data:path+='?destroy_data=true'
                 result=client.request('POST',path+'/retry') if args.import_action=='retry' else client.request('DELETE' if args.import_action=='delete' else 'GET',path)
+                if args.import_action=='delete' and result and result.get('job_id') and not args.no_wait:
+                    client.wait_job(result['job_id'])
+                    result=client.request('GET','/v1/imports/'+args.target)
         elif args.command == "deploy":
             project_id = args.project
             if not project_id:

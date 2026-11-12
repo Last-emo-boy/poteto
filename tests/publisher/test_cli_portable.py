@@ -211,10 +211,6 @@ class PortableClientTests(unittest.TestCase):
         self.assertGreaterEqual(len(result["verifier"]),43)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class ArchiveCliTests(unittest.TestCase):
     def command(self, arguments):
         client=Mock(url='https://deploy.iflink.tech')
@@ -240,3 +236,14 @@ class ArchiveCliTests(unittest.TestCase):
         self.assertEqual('preview',client.import_bundle.call_args.kwargs['target'])
         client=self.command(args)
         self.assertNotIn('target',client.import_bundle.call_args.kwargs)
+
+    def test_failed_import_cleanup_requires_explicit_data_destruction(self):
+        operation='c'*24
+        client=self.command(['import','delete',operation,'--destroy-data','--no-wait'])
+        self.assertEqual(('DELETE','/v1/imports/'+operation+'?destroy_data=true'),client.request.call_args.args)
+        client=self.command(['import','delete',operation])
+        self.assertEqual(('DELETE','/v1/imports/'+operation),client.request.call_args.args)
+
+
+if __name__ == '__main__':
+    unittest.main()

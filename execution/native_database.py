@@ -220,14 +220,19 @@ GRANT USAGE,CREATE ON SCHEMA public TO app;
 
     def remove(self):
         record=self.read()
-        if record is None:
-            if self.storage.metadata.exists() or self.storage.image.exists():
-                raise ValueError('Database storage has no runtime receipt; reconcile before deletion')
-            sandbox_network.configure(self.root,self.config)
-            return {'deleted':True}
         for path in [*(self.root/'sandboxes').glob('*.json'), *(self.root/'sandbox-migrations').glob('*.json')]:
             if json.loads(path.read_text()).get('database_id')==self.resource:
                 raise ValueError('A retained application still uses this database')
+        if record is None:
+            if self.storage.metadata.exists():
+                self.storage.record()
+                if sandbox.inspect('container',self.name) or sandbox.inspect('network',self.network):
+                    raise ValueError('Database runtime has no ownership receipt; reconcile before deletion')
+                self.storage.destroy();self.storage.directory.rmdir()
+            elif self.storage.image.exists():
+                raise ValueError('Database storage has no runtime receipt; reconcile before deletion')
+            sandbox_network.configure(self.root,self.config)
+            return {'deleted':True}
         container=self.container(record)
         network=sandbox.inspect('network',self.network)
         if network:

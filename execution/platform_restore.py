@@ -10,9 +10,11 @@ import subprocess
 import sys
 from execution.host import admit_space, checked_id, unit_state, write_json
 from publisher.archive import unpack
+from execution import native_snapshot
 
 ROOT=Path('/srv/ovh-paas-platform/restore')
 CODE=Path('/opt/paas-execution')
+EXECUTION=Path('/srv/ovh-paas-execution')
 
 
 def run(*args,**kwargs):return subprocess.run(list(args),check=True,capture_output=True,**kwargs)
@@ -64,7 +66,7 @@ def extract(operation):
     destination=path/'payload';destination.mkdir(mode=0o700)
     unpack(path/'incoming.tar.gz',destination,max_bytes=state['payload_bytes'],max_files=20000,private=True)
     manifest=json.loads((destination/'platform/manifest.json').read_text())
-    if manifest['format']!='ovh-paas-platform/2' or len(manifest['vms'])!=state['vm_count']:
+    if manifest['format'] not in {'ovh-paas-platform/2','ovh-paas-platform/3'} or len(manifest['vms'])!=state['vm_count']:
         raise ValueError('Backup manifest does not match the completed snapshot')
     roles=[role_checked(v['role']) for v in manifest['vms']]
     if len(set(roles))!=len(roles) or 'controller' not in roles:raise ValueError('Invalid VM inventory')
@@ -72,8 +74,28 @@ def extract(operation):
         if item['role']!='controller':checked_id(item['account_id'])
         for name in ['disk.qcow2','seed.iso']:
             if not (destination/'platform/vms'/item['role']/name).is_file():raise ValueError('Snapshot VM files are missing')
+    databases=manifest.get('native_databases',[])
+    if databases:
+        if manifest['format']!='ovh-paas-platform/3' or manifest.get('native_database_format')!=native_snapshot.FORMAT:
+            raise ValueError('Unsupported native database snapshot format')
+        native_snapshot.validate(destination/'platform/executor/native-databases',databases)
     (path/'incoming.tar.gz').unlink()
-    write_json(path/'status.json',state|{'state':'extracted','vms':manifest['vms']})
+    write_json(path/'status.json',state|{'state':'extracted','vms':manifest['vms'],'native_databases':databases})
+
+
+def restore_native(operation):
+    path=folder(operation);state=json.loads((path/'status.json').read_text())
+    if state['state'] not in {'extracted','stopped'}:
+        raise ValueError('Extract the authenticated backup before restoring native databases')
+    if unit_state('paas-execution-api.service') not in {'inactive','failed'}:
+        raise ValueError('Stop execution admission before restoring native databases')
+    from execution.host import lock
+    with lock('sandbox-placements'):
+        restored=native_snapshot.restore(path/'payload/platform/executor/native-databases',EXECUTION,
+            json.loads((EXECUTION/'config.json').read_text()),state.get('native_databases',[]),operation,
+            admit=lambda size:admit_space(incoming=size))
+    write_json(path/'status.json',state|{'native_restored':restored})
+    return restored
 
 
 def isolation():
@@ -175,7 +197,7 @@ def stop(operation,purge=False):
 
 def main():
     parser=argparse.ArgumentParser(description='Offline same-host restore proof; never exposes clones publicly')
-    parser.add_argument('action',choices=['prepare','receive','extract','start','status','stop','cleanup','boot'])
+    parser.add_argument('action',choices=['prepare','receive','extract','start','status','stop','cleanup','boot','restore-native'])
     parser.add_argument('operation');parser.add_argument('role',nargs='?')
     args=parser.parse_args();os.umask(0o077)
     if args.action=='boot':
@@ -185,6 +207,7 @@ def main():
     elif args.action=='receive':receive(args.operation)
     elif args.action=='extract':extract(args.operation)
     elif args.action=='start':start(args.operation)
+    elif args.action=='restore-native':restore_native(args.operation)
     elif args.action in {'stop','cleanup'}:stop(args.operation,purge=args.action=='cleanup')
     if args.action!='cleanup':print((folder(args.operation)/'status.json').read_text())
 

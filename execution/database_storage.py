@@ -133,6 +133,12 @@ class DatabaseStorage:
 
     def destroy(self):
         record = self.record()
+        pending = self.directory/'data.pending'
+        if pending.exists() or pending.is_symlink():
+            info=pending.lstat()
+            if (record['phase']!='creating' or not stat.S_ISREG(info.st_mode) or info.st_nlink!=1
+                    or info.st_uid!=os.geteuid() or info.st_size>record['bytes']):
+                raise ValueError('Database staging image is not owned by this creation attempt')
         if self.image.exists():
             self.unmount()
         elif self.mounted(record):
@@ -140,4 +146,5 @@ class DatabaseStorage:
         if self.mountpoint.exists():
             self.mountpoint.rmdir()
         self.image.unlink(missing_ok=True)
+        pending.unlink(missing_ok=True)
         self.metadata.unlink()

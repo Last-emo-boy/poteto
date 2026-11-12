@@ -1,5 +1,6 @@
 """Resumable encrypted staging and durable restoration into an empty project."""
 import asyncio
+from contextlib import ExitStack
 import fcntl
 import json
 import os
@@ -11,6 +12,7 @@ import time
 from typing import Literal
 from cryptography.fernet import InvalidToken
 from fastapi import Depends,Request
+from fastapi.responses import JSONResponse
 from pydantic import Field
 from starlette.concurrency import run_in_threadpool
 from starlette.requests import ClientDisconnect
@@ -55,6 +57,7 @@ def scopes(kinds,target='production'):
 def view(row,store):
     return {k:row[k] for k in ('id','project_id','bundle_id','size','received','state','error','deployment_id','expires')}|{
         'job_id':row['id'],'chunk_limit':CHUNK,'target':row['destination_target'],
+        'cleanup_job_id':row['cleanup_job'],
         'url':'https://'+store.settings.hostname(row['project_id'],row['deployment_id'] if row['destination_target']=='preview' else None,
                                                domain=row['app_domain']) if row['state']=='completed' else None}
 
@@ -186,12 +189,33 @@ def register(app,store,actor):
     def retry(operation: str,user=Depends(actor)):return queue(operation,user,True)
 
     @app.delete('/v1/imports/{operation}',status_code=204,tags=['Imports'])
-    def cancel(operation: str,user=Depends(actor)):
+    def cancel(operation: str,destroy_data: bool=False,user=Depends(actor)):
         with store.connection() as db:
             row=lookup(db,store,user,operation)
-            if row['state'] not in {'uploading','failed','cancelled'} or row['deployment_id'] or json.loads(row['resource_map']):
-                raise Problem(409,'This import owns resources or is applying; use the project deletion workflow after it stops')
+            pending=db.execute('SELECT * FROM jobs WHERE id=?',(row['cleanup_job'],)).fetchone() if row['cleanup_job'] else None
+            if pending and pending['state'] in {'queued','running','completed'}:
+                return JSONResponse({'job_id':pending['id'],'state':pending['state'],'import_id':operation},status_code=202)
+            if row['state'] not in {'uploading','failed','cancelled','cancelling'}:
+                raise Problem(409,'Wait for the applying import before discarding it')
             if row['upload_until'] and row['upload_until']>time.time():raise Problem(409,'An import part is still uploading')
+            if row['deployment_id'] or json.loads(row['resource_map']):
+                if not destroy_data:raise Problem(409,'This import owns resources; pass destroy_data=true to delete only its created resources')
+                project=store.project(db,user,row['project_id'],'imports:write',allow_inactive=True,allow_preview=row['destination_target']=='preview')
+                if project['current_deployment']==operation or db.execute("SELECT 1 FROM jobs WHERE deployment_id=? AND kind IN ('promote','rollback')",(operation,)).fetchone():
+                    raise Problem(409,'A published import cannot be discarded; use normal project management')
+                if db.execute("SELECT 1 FROM jobs WHERE project_id=? AND id NOT IN (?,?) AND state IN ('uploading','queued','running')",
+                              (row['project_id'],operation,row['cleanup_job'] or '')).fetchone():
+                    raise Problem(409,'Another project operation is still active')
+                now=time.time();job=row['cleanup_job'] or ident()
+                if pending:
+                    db.execute("UPDATE jobs SET state='queued',attempts=0,owner=NULL,lease_until=NULL,error=NULL,updated=? WHERE id=?",(now,job))
+                else:
+                    db.execute("INSERT INTO jobs(id,project_id,kind,deployment_id,created,updated,preview_access) VALUES(?,?,'project-import-cleanup',?,?,?,?)",
+                               (job,row['project_id'],row['deployment_id'],now,now,row['destination_target']=='preview'))
+                    db.execute('UPDATE project_imports SET cleanup_job=? WHERE id=?',(job,operation))
+                db.execute("UPDATE jobs SET state='cancelling',updated=? WHERE id=?",(now,operation))
+                store.audit(db,user,'import.discard',operation)
+                return JSONResponse({'job_id':job,'state':'queued','import_id':operation},status_code=202)
             remove_parts(store,operation)
             db.execute("UPDATE jobs SET state='cancelled',updated=? WHERE id=?",(time.time(),operation))
 
@@ -199,6 +223,61 @@ def register(app,store,actor):
 def remove_parts(store,operation):
     path=payload_dir(store,operation)
     if path.exists():shutil.rmtree(path)
+
+
+def cleanup(worker, job):
+    store=worker.store
+    with store.connection() as db:
+        worker.guard(db)
+        row=db.execute('SELECT i.*,j.project_id AS original_project FROM project_imports i JOIN jobs j ON j.id=i.id WHERE i.cleanup_job=?',(job['id'],)).fetchone()
+        if row is None or row['original_project']!=job['project_id']:raise BackendError('Import cleanup receipt is missing or foreign')
+        operation=row['id'];mapping=json.loads(row['resource_map'])
+        if not isinstance(mapping,dict) or len(set(mapping.values()))!=len(mapping):
+            raise BackendError('Import cleanup resource map is invalid')
+        project=db.execute('SELECT * FROM projects WHERE id=?',(job['project_id'],)).fetchone()
+        if project['current_deployment']==operation or db.execute("SELECT 1 FROM jobs WHERE deployment_id=? AND kind IN ('promote','rollback')",(operation,)).fetchone():
+            raise BackendError('Import cleanup cannot delete a published release')
+        release=db.execute('SELECT d.*,p.app_domain,p.preview_mode FROM deployments d JOIN projects p ON p.id=d.project_id WHERE d.id=? AND d.project_id=?',
+                           (operation,job['project_id'])).fetchone()
+        resources=[]
+        for resource_id in mapping.values():
+            resource=db.execute('SELECT * FROM data_resources WHERE id=?',(resource_id,)).fetchone()
+            if resource is None:continue
+            if resource['project_id']!=job['project_id'] or store.unseal(resource['definition']).get('import_id')!=operation:
+                raise BackendError('Import cleanup resource ownership does not match')
+            resources.append(dict(resource))
+        for retained in db.execute('SELECT config FROM deployments WHERE project_id=? AND id!=?',(job['project_id'],operation)):
+            config=json.loads(retained['config'])
+            if set(mapping.values()) & {config.get('database_id'),config.get('volume_id')}:
+                raise BackendError('Another retained release uses the imported data')
+    work=work_dir(store,operation)
+    with ExitStack() as locks:
+        if work.exists():
+            handle=locks.enter_context((work/'apply.lock').open('a'))
+            try:fcntl.flock(handle,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            except BlockingIOError:raise ObservationUnavailable('The original import is still applying') from None
+        if release is not None:
+            worker.check();worker.backend.remove(dict(release));worker.check()
+            (store.settings.root/'artifacts'/(operation+'.tar.gz')).unlink(missing_ok=True)
+            with store.connection() as db:
+                worker.guard(db);store.purge_release(db,operation)
+        data=DataBackend(worker.backend)
+        for resource in resources:
+            worker.check()
+            with store.connection() as db:
+                worker.guard(db);db.execute("UPDATE data_resources SET state='deleting',updated=? WHERE id=?",(time.time(),resource['id']))
+            data.remove(resource,worker.check)
+            with store.connection() as db:
+                worker.guard(db)
+                db.execute('UPDATE jobs SET resource_id=NULL WHERE resource_id=?',(resource['id'],))
+                db.execute('DELETE FROM data_resources WHERE id=?',(resource['id'],))
+        remove_parts(store,operation)
+        if work.exists():shutil.rmtree(work)
+        with store.connection() as db:
+            worker.guard(db);now=time.time()
+            db.execute("UPDATE project_imports SET resource_map='{}' WHERE id=?",(operation,))
+            db.execute("UPDATE jobs SET state='cancelled',error=NULL,updated=? WHERE id=?",(now,operation))
+            db.execute("UPDATE jobs SET state='completed',lease_until=NULL,updated=? WHERE id=? AND owner=?",(now,job['id'],worker.owner))
 
 
 def remove_work(store,operation):

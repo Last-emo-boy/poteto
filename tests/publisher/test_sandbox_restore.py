@@ -34,6 +34,7 @@ class SandboxRecoveryTests(unittest.TestCase):
             self.assertTrue(recover(store,operation,[release['id']],apply=True)['deployments'][0]['already_requested'])
             with store.connection() as db:
                 self.assertEqual(1,db.execute('SELECT count(*) FROM jobs').fetchone()[0])
+                self.assertEqual(1,db.execute('SELECT skip_migration FROM jobs').fetchone()[0])
                 row=db.execute('SELECT * FROM deployments WHERE id=?',(release['id'],)).fetchone()
                 self.assertEqual(release['config'],row['config'])
                 self.assertEqual(release['environment'],row['environment'])

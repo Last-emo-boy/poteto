@@ -99,3 +99,15 @@ class DatabaseStorageTests(unittest.TestCase):
         with patch.object(self.disk,'mounted',return_value=False):
             self.disk.destroy()
         self.assertFalse(self.disk.metadata.exists());self.assertFalse(self.disk.mountpoint.exists())
+
+    def test_creation_cleanup_removes_only_its_owned_pending_image(self):
+        record=self.owned_image();self.disk.image.unlink();record['phase']='creating'
+        atomic_json(self.disk.metadata,record)
+        pending=self.disk.directory/'data.pending';pending.write_bytes(b'partial filesystem')
+        with patch.object(self.disk,'mounted',return_value=False):self.disk.destroy()
+        self.assertFalse(pending.exists());self.assertFalse(self.disk.metadata.exists())
+
+    def test_ready_database_never_claims_an_unexpected_pending_image(self):
+        self.owned_image();pending=self.disk.directory/'data.pending';pending.write_bytes(b'keep')
+        with self.assertRaisesRegex(ValueError,'staging image'):self.disk.destroy()
+        self.assertTrue(self.disk.image.exists());self.assertEqual(b'keep',pending.read_bytes())

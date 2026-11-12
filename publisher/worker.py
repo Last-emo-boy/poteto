@@ -120,11 +120,19 @@ class Worker:
                 from publisher.project_imports import execute
                 execute(self,job)
                 return True
+            elif job['kind']=='project-import-cleanup':
+                deployment=None
+                from publisher.project_imports import cleanup
+                cleanup(self,job)
+                return True
             elif resource:
                 if self.data_job(job, resource):
                     return True
             elif job["kind"] == "deploy":
-                self.deploy(job, deployment)
+                if job['skip_migration'] and deployment.get('runtime_driver')==SANDBOX_DRIVER:
+                    self.deploy(job,deployment,imported={'skip_migration':True})
+                else:
+                    self.deploy(job, deployment)
             elif job["kind"] in {"promote", "rollback"}:
                 self.check()
                 self.backend.promote(deployment)

@@ -1,9 +1,12 @@
 import json
+import io
 from pathlib import Path
 import subprocess
+import tarfile
 import tempfile
 import unittest
 from unittest.mock import Mock,patch
+import zipfile
 from execution import platform_backup as backup
 from execution import platform_restore as restore
 from execution import host
@@ -21,7 +24,8 @@ class PlatformBackupTests(unittest.TestCase):
             execution=root/'execution';execution.mkdir();(execution/'builds').mkdir()
             for name in ['template.qcow2','base.img']:(execution/name).write_bytes(b'image')
             disk=root/'disk.qcow2';disk.write_bytes(b'image')
-            request={'vms':[{'role':'controller','unit':'ovh-paas-vm.service','disk':str(disk),'seed':'seed'}]}
+            request={'vms':[{'role':'controller','unit':'ovh-paas-vm.service','disk':str(disk),'seed':'seed'}],
+                     'resume_units':['ovh-paas-vm.service']}
             (path/'request.json').write_text(json.dumps(request));(path/'status.json').write_text(json.dumps({'id':op,'state':'prepared'}))
             def command(*args,**kwargs):
                 if 'qemu-img' in args:raise subprocess.CalledProcessError(1,args)
@@ -99,6 +103,68 @@ class PlatformBackupTests(unittest.TestCase):
             state=json.loads((path/'status.json').read_text());state['state']='extracted'
             (path/'status.json').write_text(json.dumps(state))
             self.assertEqual(before-1024**2,host.restore_reservations())
+
+
+class NativePlatformBackupTests(unittest.TestCase):
+    def test_busy_native_archive_or_migration_prevents_snapshot_admission(self):
+        with patch.object(backup,'run',return_value=Mock(stdout=b'active')) as run:
+            self.assertTrue(backup.build_units_active())
+        args=run.call_args.args
+        for pattern in ('paas-build@*.service','paas-migration-*.service','paas-native-dump-*.service','paas-native-restore-*.service'):
+            self.assertIn(pattern,args)
+
+    def test_native_data_and_applications_recover_before_wake_proxy(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);operation='a'*24;path=root/'backups'/operation;path.mkdir(parents=True)
+            request={'resume_units':['paas-execution-api.service','paas-sandbox-wake.service'],
+                     'vms':[],'native_databases':[{'resource_id':'b'*24}],
+                     'native_applications':[{'release_id':'c'*24}]}
+            (path/'request.json').write_text(json.dumps(request));events=[]
+            def command(*args,**kwargs):
+                if args[:2]==('systemctl','start'):events.append(args[2])
+                return Mock(stdout=b'0')
+            with patch.object(backup,'ROOT',root),patch.object(backup,'EXECUTION',root), \
+                 patch.object(backup,'unit_state',return_value='inactive'),patch.object(backup,'run',side_effect=command), \
+                 patch.object(backup.native_snapshot,'restore_running',side_effect=lambda *a:events.append('data') or []), \
+                 patch.object(backup.native_snapshot,'set_applications',side_effect=lambda *a,**k:events.append('apps')):
+                backup.resume(operation)
+            self.assertEqual(['data','paas-execution-api.service','apps','paas-sandbox-wake.service'],events)
+
+    def fixture(self, root, version):
+        operation='a'*24;path=root/operation;path.mkdir();source=root/'source';source.mkdir()
+        vm=source/'vms/controller';vm.mkdir(parents=True)
+        (vm/'disk.qcow2').write_bytes(b'disk');(vm/'seed.iso').write_bytes(b'seed')
+        item={'resource_id':'b'*24,'account_id':'c'*24,'project_id':'d'*24,'running':True}
+        data=source/'executor/native-databases'/item['resource_id'];data.mkdir(parents=True)
+        (data/'database.json').write_text(json.dumps(item|{'phase':'ready','admin_password':'A'*48,'app_password':'B'*48}))
+        with zipfile.ZipFile(data/'data.zip','w') as archive:archive.writestr('databases/'+item['resource_id']+'.dump',b'PGDMP123')
+        manifest={'format':version,'vms':[{'role':'controller'}],'native_databases':[item],
+                  'native_database_format':'poteto-native-postgres/1'}
+        (source/'manifest.json').write_text(json.dumps(manifest))
+        with tarfile.open(path/'incoming.tar.gz','w:gz') as archive:archive.add(source,arcname='platform')
+        (path/'status.json').write_text(json.dumps({'state':'received','vm_count':1,'payload_bytes':1024**2}))
+        return operation,path
+
+    def test_extract_validates_portable_native_databases_and_keeps_legacy_format_distinct(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);operation,path=self.fixture(root,'ovh-paas-platform/3')
+            with patch.object(restore,'ROOT',root):restore.extract(operation)
+            state=json.loads((path/'status.json').read_text())
+            self.assertEqual('extracted',state['state']);self.assertEqual(1,len(state['native_databases']))
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);operation,path=self.fixture(root,'ovh-paas-platform/2')
+            with patch.object(restore,'ROOT',root),self.assertRaisesRegex(ValueError,'Unsupported native'):
+                restore.extract(operation)
+            self.assertTrue((path/'incoming.tar.gz').exists())
+
+    def test_native_restore_requires_disabled_execution_admission(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root=Path(temp);path=root/('a'*24);path.mkdir()
+            (path/'status.json').write_text(json.dumps({'state':'extracted'}))
+            with patch.object(restore,'ROOT',root),patch.object(restore,'unit_state',return_value='active'), \
+                 patch.object(restore.native_snapshot,'restore') as native,self.assertRaisesRegex(ValueError,'Stop execution'):
+                restore.restore_native('a'*24)
+            native.assert_not_called()
 
 
 if __name__=='__main__':unittest.main()

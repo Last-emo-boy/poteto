@@ -12,6 +12,7 @@ import sys
 import tarfile
 import time
 from execution.host import admit_space, checked_id, unit_state, write_json, wait_ready
+from execution import native_snapshot
 
 ROOT=Path('/srv/ovh-paas-platform')
 CONTROL=Path('/srv/ovh-paas')
@@ -50,8 +51,14 @@ def inventory():
 
 
 def build_units_active():
-    result=run('systemctl','list-units','--state=active,activating,deactivating','--plain','--no-legend','paas-build@*.service')
+    result=run('systemctl','list-units','--state=active,activating,deactivating','--plain','--no-legend',
+               'paas-build@*.service','paas-migration-*.service','paas-native-dump-*.service','paas-native-restore-*.service')
     return bool(result.stdout.strip())
+
+
+def native_config():
+    path=EXECUTION/'config.json'
+    return json.loads(path.read_text()) if path.exists() else {}
 
 
 def prepare(operation,request):
@@ -62,14 +69,18 @@ def prepare(operation,request):
     path.mkdir(parents=True,mode=0o700,exist_ok=False)
     os.chmod(path,0o700)
     vms=inventory()
+    databases=native_snapshot.inventory(EXECUTION,native_config())
+    applications=native_snapshot.applications(EXECUTION)
     for item in vms:
         if not Path(item['disk']).is_file() or not Path(item['seed']).is_file():
             raise ValueError('A persistent VM disk or seed is missing')
     units=[item['unit'] for item in vms]+['paas-execution-api.service']
+    if applications:units.append('paas-sandbox-wake.service')
     states={unit:unit_state(unit) for unit in units}
     if any(state not in {'active','inactive','failed'} for state in states.values()):
         raise ValueError('A VM/service is transitioning; wait for its actual operation to finish')
-    value=request|{'format':'ovh-paas-platform/2','id':operation,'created':time.time(),'vms':vms,
+    value=request|{'format':'ovh-paas-platform/3' if databases else 'ovh-paas-platform/2',
+        'id':operation,'created':time.time(),'vms':vms,'native_databases':databases,'native_applications':applications,
         'resume_units':[unit for unit,state in states.items() if state=='active']}
     write_json(path/'request.json',value)
     write_json(path/'status.json',{'id':operation,'state':'prepared','created':value['created']})
@@ -128,6 +139,10 @@ def metadata(stage,request):
     manifest['restore']='standalone qcow2; restore clones must use independent UIDs and loopback ports'
     manifest['sandbox_count']=len(list((EXECUTION/'sandboxes').glob('*.json')))
     manifest['sandbox_recovery']='Recreate stateless containers on the restored executor with publisher.sandbox_restore after provisioning the sandbox runtime.'
+    if request.get('native_databases'):
+        manifest['native_database_format']=native_snapshot.FORMAT
+        manifest['native_databases']=request['native_databases']
+        manifest['native_database_recovery']='Run execution.platform_restore restore-native before starting execution admission and recreating applications.'
     write_json(stage/'manifest.json',manifest)
 
 
@@ -139,11 +154,13 @@ def resume(operation,allow_active=False):
     main=int(run('systemctl','show',unit,'--property=MainPID','--value').stdout.strip() or '0')
     if not allow_active and state in {'active','activating','deactivating'} and main:
         raise ValueError('Backup process is still alive; observe that same job instead of restarting its VMs')
-    # Supervisor first, then tenants, finally the controller.
+    # Recover native data before applications, then restart only recorded services.
     order=sorted(request['resume_units'],key=lambda name:(name=='ovh-paas-vm.service',name!='paas-execution-api.service',name))
     path=EXECUTION/'placements.json'
     placements=json.loads(path.read_text()) if path.exists() else {}
+    failures=native_snapshot.restore_running(EXECUTION,native_config(),request.get('native_databases',[]))
     for name in order:
+        if name=='paas-sandbox-wake.service':continue
         item=next((v for v in request['vms'] if v['unit']==name and v['role'].startswith('runtime')),None)
         if item and (placements.get(item['account_id'],{}).get('slot')!=item['slot'] or not Path(item['disk']).is_file()):
             continue
@@ -151,6 +168,10 @@ def resume(operation,allow_active=False):
             run('systemctl','start',name,timeout=180)
             if item:
                 wait_ready(item['role'],22100+item['slot'],'runtime-'+item['account_id'],timeout=180)
+    native_snapshot.set_applications(request.get('native_applications',[]),resume=True)
+    if 'paas-sandbox-wake.service' in request['resume_units'] and unit_state('paas-sandbox-wake.service') not in {'active','activating'}:
+        run('systemctl','start','paas-sandbox-wake.service',timeout=180)
+    if failures:raise ValueError('Native databases need recovery: '+'; '.join(failures))
 
 
 def snapshot(operation):
@@ -162,7 +183,7 @@ def snapshot(operation):
         except BlockingIOError:
             raise ValueError('A build or builder preparation still owns the disposable guest') from None
         if build_units_active():
-            raise ValueError('An actual build unit is still active; wait for its supervisor')
+            raise ValueError('A build, migration or archive unit is still active; wait for its supervisor')
         stage=path/'payload'
         if stage.exists():raise ValueError('Snapshot payload already exists; inspect this operation before starting a new one')
         # Two copies plus the host reserve cover flattened snapshots and the
@@ -170,6 +191,7 @@ def snapshot(operation):
         used=sum(Path(v['disk']).stat().st_blocks*512 for v in request['vms'])
         used+=sum(p.stat().st_blocks*512 for p in [EXECUTION/'template.qcow2',EXECUTION/'base.img'])
         used+=sum(p.stat().st_blocks*512 for p in (EXECUTION/'builds').rglob('image.tar'))
+        used+=len(request.get('native_databases',[]))*(2*1024**3+16*1024**2)
         admit_space(incoming=used*2)
         stage.mkdir(mode=0o700)
         phase(path,'stopping')
@@ -177,6 +199,19 @@ def snapshot(operation):
             run('systemctl','stop','paas-execution-api.service',timeout=180)
             if inventory()!=request['vms']:
                 raise ValueError('Tenant placement changed after backup preparation; start a new inventory')
+            if build_units_active():raise ValueError('An execution unit is still active after stopping admission')
+            databases=native_snapshot.inventory(EXECUTION,native_config())
+            identities=lambda rows:[{k:r[k] for k in ('resource_id','account_id','project_id')} for r in rows]
+            if identities(databases)!=identities(request.get('native_databases',[])):
+                raise ValueError('Native database inventory changed after backup preparation')
+            applications=native_snapshot.applications(EXECUTION)
+            if (applications or 'paas-sandbox-wake.service' in request['resume_units']) and unit_state('paas-sandbox-wake.service') in {'active','activating'}:
+                if 'paas-sandbox-wake.service' not in request['resume_units']:request['resume_units'].append('paas-sandbox-wake.service')
+                run('systemctl','stop','paas-sandbox-wake.service',timeout=120)
+            request['native_databases']=databases
+            request['native_applications']=applications
+            write_json(path/'request.json',request)
+            native_snapshot.set_applications(request['native_applications'])
             for item in request['vms']:
                 if unit_state(item['unit']) in {'active','activating'}:
                     run('systemctl','stop',item['unit'],timeout=180)
@@ -191,6 +226,8 @@ def snapshot(operation):
                 write_json(folder/'image.json',info)
                 copy_file(Path(item['seed']),folder/'seed.iso')
             metadata(stage,request)
+            if databases:
+                native_snapshot.capture(EXECUTION,native_config(),databases,operation,stage/'executor/native-databases')
         finally:
             resume(operation,allow_active=True)
         payload_bytes=sum(p.stat().st_size for p in stage.rglob('*') if p.is_file())

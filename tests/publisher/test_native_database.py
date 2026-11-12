@@ -119,3 +119,12 @@ class NativeDatabaseTests(unittest.TestCase):
             self.database.stop()
         self.assertEqual(['stop','unmount'],events)
         self.assertTrue(self.database.path.exists())
+
+    def test_interrupted_provisioning_can_clean_owned_storage_without_a_runtime(self):
+        self.database.storage.directory.mkdir(parents=True)
+        self.database.storage.metadata.write_text('{}')
+        def destroy():self.database.storage.metadata.unlink()
+        with patch.object(self.database.storage,'record'),patch.object(self.database.storage,'destroy',side_effect=destroy) as cleanup, \
+             patch.object(native.sandbox,'inspect',return_value=None),patch.object(native.sandbox_network,'configure'):
+            self.assertEqual({'deleted':True},self.database.remove())
+        cleanup.assert_called_once();self.assertFalse(self.database.storage.directory.exists())
