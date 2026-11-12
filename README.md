@@ -88,7 +88,9 @@ poteto plan . --prebuilt-image .poteto/image.tar.gz --json
 poteto deploy . --prebuilt-image .poteto/image.tar.gz --preview --url-only
 ```
 
-Use Docker Engine with API 1.48 or newer for platform-specific image export. Poteto accepts a single image (50 MiB compressed, 200 MiB expanded); build a lean final image. Use the image's entrypoint and listen on `0.0.0.0:$PORT` as UID 10001. Runtime settings such as the health check and database binding come from `poteto.json` or `--config`, not from build flags. The image is loaded only into the project's existing isolated tenant runtime. Existing source deployments are unchanged.
+Use Docker Engine with API 1.48 or newer for platform-specific image export. Poteto accepts a single image (128 MiB compressed, 512 MiB expanded); build a lean final image. Use the image's entrypoint and listen on `0.0.0.0:$PORT` as UID 10001. Runtime settings such as the health check and database binding come from `poteto.json` or `--config`, not from build flags. The image is loaded only into the project's existing isolated tenant runtime. Existing source deployments are unchanged.
+
+The source/static upload limits remain 50/200 MiB. To budget retained images and rollback candidates for one account, an operator can use `paas-admin set-storage-limit ACCOUNT_NAME --confirm-account ACCOUNT_ID --mib 2048` on the controller. This does not change other accounts or their runtime limits; lowering it below current reservations is refused.
 
 ## Framework presets
 

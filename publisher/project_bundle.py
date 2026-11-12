@@ -9,6 +9,7 @@ from typing import Annotated,Literal
 import zipfile
 from pydantic import Field,ValidationError,model_validator
 from publisher.archive import ArchiveError,unpack
+from publisher import image_contract
 from publisher.models import DeploymentInput,EnvironmentInput,Input
 from publisher.static_artifacts import BUILT_LIMIT
 from publisher.transfer_wire import BUNDLE_LIMIT,FORMAT,BoundedZipInput,BundleError
@@ -117,7 +118,11 @@ def unpack_bundle(path,destination,*,source_stats=None):
         if not manifest or not 0<manifest.file_size<=256*1024:raise BundleError('Project manifest is absent or too large')
         try:value=Manifest.model_validate_json(archive.read(manifest))
         except ValidationError:raise BundleError('Project manifest does not match the supported format') from None
-        limits={'manifest.json':256*1024,'source.tar.gz':50*1024**2}
+        image = value.configuration.runtime == 'image'
+        upload_limit = image_contract.UPLOAD_LIMIT if image else 50*1024**2
+        unpack_limit = image_contract.UNPACK_LIMIT if image else 200*1024**2
+        file_limit = image_contract.FILE_LIMIT if image else 10000
+        limits={'manifest.json':256*1024,'source.tar.gz':upload_limit}
         if value.built_static:
             limits['static.tar.gz']=BUILT_LIMIT
         if not value.static_artifact:
@@ -132,7 +137,7 @@ def unpack_bundle(path,destination,*,source_stats=None):
                 target.chmod(0o600);shutil.copyfileobj(source,out,1024**2)
             if target.stat().st_size!=entries[name].file_size:raise BundleError('Project bundle entry is truncated')
     try:
-        stats=unpack(destination/'source.tar.gz',None,max_bytes=200*1024**2,max_files=10000)
+        stats=unpack(destination/'source.tar.gz',None,max_bytes=unpack_limit,max_files=file_limit)
         if value.built_static:
             unpack(destination/'static.tar.gz',None,max_bytes=200*1024**2,max_files=10000)
     except ArchiveError as error:raise BundleError(str(error)) from None

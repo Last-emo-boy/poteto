@@ -46,7 +46,7 @@ poteto deploy "$APP_DIR" --prebuilt --project "$PROJECT_ID" --preview --url-only
 
 已有静态成品时，也可以直接部署含 `index.html` 的成品目录，例如 `dist/`。
 
-**动态应用：项目已开通镜像试点且已有可信的 linux/amd64 镜像时，优先用成品。** 用 `poteto build "$APP_DIR" --from-image "$IMAGE"` 打包本地镜像。对同一个应用目录，在 `plan` 和 `deploy` 上都传 `--prebuilt-image "$APP_DIR/.poteto/image.tar.gz"`，并继续用 `--preview`。镜像上限为压缩 50 MiB、展开 200 MiB；不要把凭据、运行时密钥或数据库内容打进镜像。项目未开通时，使用已有源码发布流程，不要反复提交镜像。
+**动态应用：项目已开通镜像试点且已有可信的 linux/amd64 镜像时，优先用成品。** 用 `poteto build "$APP_DIR" --from-image "$IMAGE"` 打包本地镜像。对同一个应用目录，在 `plan` 和 `deploy` 上都传 `--prebuilt-image "$APP_DIR/.poteto/image.tar.gz"`，并继续用 `--preview`。镜像上限为压缩 128 MiB、展开 512 MiB；不要把凭据、运行时密钥或数据库内容打进镜像。项目未开通时，使用已有源码发布流程，不要反复提交镜像。
 
 - Node 源码构建需要 npm 锁文件。动态应用须监听 `0.0.0.0` 上平台提供的 `PORT`；非 npm 构建可以使用 Dockerfile。预览数据库或卷由项目所有者预先创建和授权，沿用已有绑定。
 - 预检失败时按 JSON 的 `error.code` 和 `error.message` 处理；不要绕过预检或改用生产发布。上传后失败时用 `poteto deployments --project "$PROJECT_ID"` 和 `poteto logs <发布 ID>` 定位，不盲目重复创建发布。

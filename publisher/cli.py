@@ -21,11 +21,13 @@ if __package__:
     from .cli_tools import VERSION, PlanError, deployment_config, initialize, pack, plan_deployment
     from .cli_project import deployment_reference, find_link, unlink, write_link
     from .cli_prebuilt import build_static, package_image, read_image, read_prebuilt
+    from .image_contract import UPLOAD_LIMIT as IMAGE_UPLOAD_LIMIT
     from .login_contract import DEFAULT_URL, LOGIN_PATH
     from .transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
 else:
     from cli_login import default_token_file, login, logout
     from cli_tools import VERSION, PlanError, deployment_config, initialize, pack, plan_deployment
+    from image_contract import UPLOAD_LIMIT as IMAGE_UPLOAD_LIMIT
     from cli_project import deployment_reference, find_link, unlink, write_link
     from login_contract import DEFAULT_URL, LOGIN_PATH
     from transfer_wire import BUNDLE_LIMIT, CHUNK, FORMAT, BoundedZipInput
@@ -560,8 +562,9 @@ def main(prog="poteto"):
                 config["target"] = "production"
             elif args.preview or ((signed_in_project or linked_project) and "target" not in config):
                 config["target"] = "preview"
-            if len(source) > 50 * 1024 * 1024:
-                raise RuntimeError("Archive exceeds the server upload limit of 50 MiB")
+            limit = IMAGE_UPLOAD_LIMIT if config.get("runtime") == "image" else 50 * 1024**2
+            if len(source) > limit:
+                raise RuntimeError(f"Archive exceeds the server upload limit of {limit // 1024**2} MiB")
             result = client.request("POST", f"/v1/projects/{project_id}/deployments", config)
             try:
                 client.request("PUT", result["upload_url"], source, raw=True)

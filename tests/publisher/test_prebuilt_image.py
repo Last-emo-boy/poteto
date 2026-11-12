@@ -105,6 +105,22 @@ class PrebuiltImageTests(unittest.TestCase):
         self.assertEqual(expected["target"], DeploymentInput(**expected).target)
         self.assertEqual(self.source.read_bytes(), body)
 
+    def test_image_upload_does_not_inherit_small_source_limit(self):
+        settings = Settings(self.root, upload_limit=64, unpack_limit=64)
+        store = Store(settings)
+        owner = store.create_account("different-limits")
+        actor = store.authenticate(owner["token"])
+        project = store.create_project(actor, "image")["id"]
+        settings = replace(settings, prebuilt_image_projects=(project,))
+        with TestClient(create_app(settings), headers={"Authorization": "Bearer " + owner["token"]}) as api:
+            source = api.post(f"/v1/projects/{project}/deployments", json={"target": "preview"}).json()
+            self.assertEqual(413, api.put(source["upload_url"], content=archive({"index.html": b"hello"}),
+                                         headers={"Content-Type": "application/gzip"}).status_code)
+            image = api.post(f"/v1/projects/{project}/deployments", json={"runtime": "image", "target": "preview"}).json()
+            result = api.put(image["upload_url"], content=docker_image(),
+                             headers={"Content-Type": "application/gzip"})
+            self.assertEqual(202, result.status_code, result.text)
+
     def test_project_opt_in_preview_scope_and_redeploy(self):
         settings = Settings(self.root)
         store = Store(settings)

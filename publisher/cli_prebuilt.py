@@ -9,6 +9,7 @@ import sys
 import tempfile
 
 from .archive import ArchiveError, unpack
+from . import image_contract
 from .cli_project import local_directory
 from .cli_tools import PlanError, deployment_config, pack, plan_deployment, upload_files
 
@@ -29,12 +30,14 @@ def _artifact(root, name="output.tar.gz"):
     return path
 
 
-def _inspect(source, *, entrypoint="index.html"):
-    if len(source) > UPLOAD_LIMIT:
-        raise PlanError("artifact_too_large", "Archive exceeds the server upload limit of 50 MiB")
+def _inspect(source, *, image=False):
+    upload, expanded, files = ((image_contract.UPLOAD_LIMIT, image_contract.UNPACK_LIMIT, image_contract.FILE_LIMIT)
+                               if image else (UPLOAD_LIMIT, UNPACK_LIMIT, FILE_LIMIT))
+    if len(source) > upload:
+        raise PlanError("artifact_too_large", f"Archive exceeds the server upload limit of {upload // 1024**2} MiB")
     try:
-        return unpack(io.BytesIO(source), None, max_bytes=UNPACK_LIMIT,
-                      max_files=FILE_LIMIT, required_file=entrypoint)
+        return unpack(io.BytesIO(source), None, max_bytes=expanded,
+                      max_files=files, required_file="manifest.json" if image else "index.html")
     except ArchiveError as error:
         raise PlanError("invalid_artifact", str(error)) from None
 
@@ -134,8 +137,8 @@ def package_image(directory: Path, reference: str, credential_file: Path | str):
                 with gzip.GzipFile(filename="", mode="wb", fileobj=out, compresslevel=3, mtime=0) as compressed:
                     while chunk := process.stdout.read(1024**2):
                         size += len(chunk)
-                        if size > UNPACK_LIMIT + FILE_LIMIT * 2048 or out.tell() > UPLOAD_LIMIT:
-                            raise PlanError("artifact_too_large", "The Docker image exceeds the 50 MiB compressed / 200 MiB expanded limits.")
+                        if size > image_contract.ARCHIVE_LIMIT or out.tell() > image_contract.UPLOAD_LIMIT:
+                            raise PlanError("artifact_too_large", "The Docker image exceeds the 128 MiB compressed / 512 MiB expanded limits.")
                         compressed.write(chunk)
                 if process.wait():
                     raise PlanError("image_save_failed", "Could not save a local linux/amd64 image; see Docker output above.")
@@ -143,8 +146,8 @@ def package_image(directory: Path, reference: str, credential_file: Path | str):
                 if process.poll() is None:
                     process.kill()
         with pending.open("rb") as source:
-            data = source.read(UPLOAD_LIMIT + 1)
-        _inspect(data, entrypoint="manifest.json")
+            data = source.read(image_contract.UPLOAD_LIMIT + 1)
+        _inspect(data, image=True)
         pending.replace(artifact)
     finally:
         pending.unlink(missing_ok=True)
@@ -160,8 +163,8 @@ def read_image(directory: Path, artifact: Path, config: Path | None, credential_
     if not artifact.is_file():
         raise PlanError("missing_artifact", "Choose a regular Docker image archive from poteto build --from-image.")
     with artifact.open("rb") as source:
-        data = source.read(UPLOAD_LIMIT + 1)
-    stats = _inspect(data, entrypoint="manifest.json")
+        data = source.read(image_contract.UPLOAD_LIMIT + 1)
+    stats = _inspect(data, image=True)
     if config is not None and not config.is_file():
         raise PlanError("missing_config", f"Deployment config does not exist: {config}")
     try:

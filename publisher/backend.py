@@ -530,10 +530,11 @@ class Dokploy:
             raise BackendError(status.get('error', 'Isolated build failed'))
         if static and (status.get('driver'), status.get('output_kind')) != ('vm', 'static'):
             raise BackendError('Isolated builder did not return static files')
-        if prebuilt:
+        if config['runtime'] == 'image':
+            from publisher.image_contract import ARCHIVE_LIMIT
             size = status.get('image_bytes')
-            if (status.get('driver') != 'prebuilt' or status.get('image') != 'paas-release:' + deployment['id']
-                    or type(size) is not int or not 0 < size <= 202 * 1024**2):
+            if ((prebuilt and status.get('driver') != 'prebuilt') or status.get('image') != 'paas-release:' + deployment['id']
+                    or type(size) is not int or not 0 < size <= ARCHIVE_LIMIT):
                 raise BackendError('Invalid prebuilt image receipt')
             self.store.reserve_built_artifact(deployment['id'], size, image=True)
         if check:

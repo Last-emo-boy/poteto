@@ -47,6 +47,12 @@ class Settings:
         if type(self.static_source_builds) is not bool:
             raise ValueError('static_source_builds must be a boolean')
 
+    def upload_limits(self, runtime):
+        if runtime == "image":
+            from publisher.image_contract import UPLOAD_LIMIT, UNPACK_LIMIT, FILE_LIMIT
+            return UPLOAD_LIMIT, UNPACK_LIMIT, FILE_LIMIT
+        return self.upload_limit, self.unpack_limit, self.file_limit
+
     def artifact_enabled(self, project, config, *, restored=False):
         selection = self.static_artifacts
         return (selection is True or (selection is not False and project in selection)) and (

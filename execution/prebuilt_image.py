@@ -11,8 +11,7 @@ import zlib
 
 from publisher.archive import ArchiveError, unpack
 
-TRANSPORT_LIMIT = 50 * 1024**2
-IMAGE_LIMIT = 200 * 1024**2
+from publisher.image_contract import UPLOAD_LIMIT as TRANSPORT_LIMIT, UNPACK_LIMIT as IMAGE_LIMIT, FILE_LIMIT
 METADATA_LIMIT = 1024**2
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 MEMBER = re.compile(r"[a-zA-Z0-9][a-zA-Z0-9_.-]*(?:/[a-zA-Z0-9][a-zA-Z0-9_.-]*)*")
@@ -129,7 +128,7 @@ def add_layer(archive, name, path, expected, limit, *, scratch):
             while chunk := layer.read(1024**2):
                 size += len(chunk)
                 if size > limit:
-                    raise ImageError("Unpacked image layers exceed 200 MiB")
+                    raise ImageError("Unpacked image layers exceed 512 MiB")
                 digest.update(chunk)
                 staged.write(chunk)
             if "sha256:" + digest.hexdigest() != expected:
@@ -146,14 +145,14 @@ def normalize(source: Path, destination: Path, release_id: str):
     if not re.fullmatch(r"[a-f0-9]{24}", release_id):
         raise ImageError("Invalid image release ID")
     if not 0 < source.stat().st_size <= TRANSPORT_LIMIT:
-        raise ImageError("Compressed image exceeds the 50 MiB upload limit")
+        raise ImageError("Compressed image exceeds the 128 MiB upload limit")
     image = "paas-release:" + release_id
     total = 0
     pending = destination.with_suffix(".next")
     try:
         with tempfile.TemporaryDirectory(dir=destination.parent) as workspace:
             root = Path(workspace)
-            unpack(source, root, max_bytes=IMAGE_LIMIT, max_files=1024, private=True)
+            unpack(source, root, max_bytes=IMAGE_LIMIT, max_files=FILE_LIMIT, private=True)
             config, layers = inspect(root)
             config_data = config.read_bytes()
             config_name = hashlib.sha256(config_data).hexdigest() + ".json"

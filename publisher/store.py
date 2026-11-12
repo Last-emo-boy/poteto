@@ -433,10 +433,11 @@ class Store:
         return {"keys": sorted(current), "applies_to": "new deployments"}
 
     def begin_upload(self, actor, deployment_id, upload_id):
-        if shutil.disk_usage(self.settings.root).free < 1024 * 1024 * 1024 + self.settings.upload_limit:
-            raise Problem(507, "Upload refused to preserve the platform's free disk reserve")
         with self.connection() as db:
             deployment = self.deployment(db, actor, deployment_id, "deployments:write", allow_preview=True)
+            upload_limit, _, _ = self.settings.upload_limits(json.loads(deployment["config"])["runtime"])
+            if shutil.disk_usage(self.settings.root).free < 1024**3 + upload_limit:
+                raise Problem(507, "Upload refused to preserve the platform's free disk reserve")
             if deployment["state"] != "uploading":
                 raise Problem(409, "Deployment no longer accepts an upload")
             db.execute("DELETE FROM uploads WHERE expires<?", (time.time(),))

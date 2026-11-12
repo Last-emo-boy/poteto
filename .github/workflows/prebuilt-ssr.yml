@@ -4,6 +4,9 @@ on:
   push:
     paths:
       - 'fixtures/next-postgres/**'
+      - 'publisher/image_contract.py'
+      - 'publisher/cli_prebuilt.py'
+      - 'execution/prebuilt_image.py'
       - 'tests/linux/test-next-postgres.sh'
       - '.github/workflows/prebuilt-ssr.yml'
 permissions:

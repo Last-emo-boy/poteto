@@ -212,8 +212,10 @@ def create_app(settings=None):
             content_length = int(request.headers.get("content-length", "0"))
         except ValueError:
             raise Problem(400, "Invalid Content-Length") from None
-        if content_length > settings.upload_limit:
-            raise Problem(413, "Source upload exceeds 50 MiB")
+        runtime = json.loads(deployment["config"])["runtime"]
+        upload_limit, unpack_limit, file_limit = settings.upload_limits(runtime)
+        if content_length > upload_limit:
+            raise Problem(413, f"Upload exceeds {upload_limit // 1024**2} MiB")
         path = settings.root / "uploads" / (ident() + ".part")
         size = 0
         upload_id = ident()
@@ -223,14 +225,14 @@ def create_app(settings=None):
                 with path.open("xb") as out:
                     async for chunk in request.stream():
                         size += len(chunk)
-                        if size > settings.upload_limit:
-                            raise Problem(413, "Source upload exceeds its limit")
+                        if size > upload_limit:
+                            raise Problem(413, "Upload exceeds its limit")
                         out.write(chunk)
             try:
-                if json.loads(deployment["config"])["runtime"] == "image":
+                if runtime == "image":
                     from starlette.concurrency import run_in_threadpool
-                    stats = await run_in_threadpool(unpack, path, None, max_bytes=settings.unpack_limit,
-                                                    max_files=settings.file_limit, required_file="manifest.json")
+                    stats = await run_in_threadpool(unpack, path, None, max_bytes=unpack_limit,
+                                                    max_files=file_limit, required_file="manifest.json")
                 else:
                     stats = unpack(path, None, max_bytes=settings.unpack_limit, max_files=settings.file_limit)
             except ArchiveError as error:
