@@ -15,7 +15,7 @@ import jwt
 from pydantic import Field
 from publisher.login_contract import ISSUER, LOGIN_PATH, REDIRECT_URI
 from publisher.models import Input
-from publisher.store import PREVIEW_MANAGE_SCOPE, PREVIEW_SCOPE, Problem
+from publisher.store import PREVIEW_ENV_SCOPE, PREVIEW_WEB_SCOPE, PREVIEW_MANAGE_SCOPE, PREVIEW_SCOPE, Problem
 
 LOGIN_ISSUE = "token.cli-login"
 
@@ -25,6 +25,8 @@ class LoginExchange(Input):
     verifier: str = Field(pattern=r"^[A-Za-z0-9._~-]{43,128}$")
     nonce: str = Field(pattern=r"^[A-Za-z0-9_-]{43}$")
     manage_previews: bool = Field(default=False, strict=True)
+    manage_env: bool = Field(default=False, strict=True)
+    allow_web: bool = Field(default=False, strict=True)
 
 
 def request_id_token(client_id, request):
@@ -76,7 +78,8 @@ class CliLogin:
     def register(self, app, store, actor):
         @app.get(LOGIN_PATH, tags=["Account"])
         def config():
-            return {"issuer": ISSUER, "client_id": self.client_id, "preview_management": True}
+            return {"issuer": ISSUER, "client_id": self.client_id, "preview_management": True,
+                    "preview_environment": True, "web_egress": store.settings.sandbox_web}
 
         @app.post(LOGIN_PATH, status_code=201, tags=["Account"])
         def exchange(body: LoginExchange):
@@ -98,8 +101,15 @@ class CliLogin:
                 ).fetchone()
                 if project is None:
                     raise Problem(403, "The linked Poteto project is no longer available")
+                scopes = [PREVIEW_SCOPE]
+                for enabled, scope in [(body.manage_previews, PREVIEW_MANAGE_SCOPE),
+                                       (body.manage_env, PREVIEW_ENV_SCOPE), (body.allow_web, PREVIEW_WEB_SCOPE)]:
+                    if enabled:
+                        scopes.append(scope)
+                if body.allow_web and not store.settings.sandbox_web:
+                    raise Problem(503, "Web egress is not enabled on this platform")
                 grant = store.mint_token(db, {"id": None, "account_id": project["account_id"]},
-                                         name="Poteto CLI", scopes=([PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE] if body.manage_previews else [PREVIEW_SCOPE]), project_ids=[project_id],
+                                         name="Poteto CLI", scopes=scopes, project_ids=[project_id],
                                          expires=time.time() + 7 * 86400, action=LOGIN_ISSUE)
             return grant | {"project_id": project_id}
 

@@ -9,7 +9,7 @@ description: 用 Poteto CLI 把现有应用目录预检并发布到 Poteto 的 H
 
 ## 安装与凭据
 
-如果没有可用的 Poteto 0.14.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
+如果没有可用的 Poteto 0.15.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
 
 ```sh
 curl -fsSL https://poteto.iflink.tech/install.sh | sh
@@ -50,7 +50,7 @@ poteto deploy "$APP_DIR" --prebuilt --project "$PROJECT_ID" --preview --url-only
 
 **动态应用分步构建时：** `poteto build "$APP_DIR"` 可构建 Node 或 Dockerfile 项目；已有可信镜像时用 `poteto build "$APP_DIR" --from-image "$IMAGE"`，不会重建。对同一个应用目录，在 `plan` 和 `deploy` 上都传 `--prebuilt-image "$APP_DIR/.poteto/image.tar.gz"`，预检加 `--remote --project "$PROJECT_ID"`，并继续用 `--preview`。镜像上限为压缩 128 MiB、展开 512 MiB；Next.js 等框架优先用多阶段 Dockerfile 和 standalone 产物。不要把凭据、运行时密钥或数据库内容打进镜像。先以 `poteto doctor` / 远端预检确认项目能力；新版新注册个人项目可默认接收镜像，旧托管项目仍按原开通策略。未开通时说明缺项，不反复提交。
 
-远端预检的 `runtime_driver: "gvisor"` 表示平台将直接启动隔离容器，不使用构建 VM 或租户 VM。该通道需项目另行开通，只用于至少 256 MiB、无数据库/卷/迁移、无需外网访问的预览。休眠需项目再开通 `sandbox_sleep_projects`，之后 `sleep: true` 会由 Sablier 在空闲后停止、访问时等待健康检查再唤醒；未开通时保留原运行路径。沿用应用的实际需求，不为选用此通道删除数据绑定。配额满或隔离启动失败时处理错误，不退回无隔离运行。
+远端预检的 `runtime_driver: "gvisor"` 表示平台将直接启动隔离容器，不使用构建 VM 或租户 VM。新个人项目默认可用，只用于至少 256 MiB、无数据库/卷/迁移的预览；旧项目仍需平台开通。新个人项目默认休眠，旧项目需开通 `sandbox_sleep_projects`；`sleep: true` 会由 Sablier 在空闲后停止、访问时等待健康检查再唤醒。沿用应用的实际需求，不为选用此通道删除数据绑定。配额满或隔离启动失败时处理错误，不退回无隔离运行。
 
 - Node 源码构建需要 npm 锁文件。动态应用须监听 `0.0.0.0` 上平台提供的 `PORT`；非 npm 构建可以使用 Dockerfile。预览数据库或卷由项目所有者预先创建和授权，沿用已有绑定。
 - CLI 0.12.0 配合新版服务端会自动分片上传，并在当前应用的 `.poteto/` 保存不含凭据的待上传成品。若上传中断，在同一目录执行 `poteto deploy . --project "$PROJECT_ID" --resume <发布 ID>`，沿用输出中的 ID；不要重新构建、添加 `--local-build`、更换目标或创建另一个发布。收到服务端已入队确认后，本地待上传副本会自动删除。
@@ -60,7 +60,7 @@ poteto deploy "$APP_DIR" --prebuilt --project "$PROJECT_ID" --preview --url-only
 
 后续用 `poteto inspect <预览 URL>` 查看同一个部署，用 `poteto logs <预览 URL>` 查看日志，加 `--follow` 可在构建过程中持续查看输出，用 `poteto ls` 列出当前项目发布。此技能始终使用 `--preview`；不得为了绕过预览权限改用 `--prod`。
 
-Next.js / Vite 项目可在预检和部署时同时加 `--preset nextjs` / `--preset vite`，或在 `poteto.json` 指定 `preset`。保留已有目录和锁文件。只有用户明确选择服务器源码构建时，才省略 `--local-build`。环境变量操作需 `env:write`，不要为预览 Agent 扩权；`poteto redeploy <预览 URL> --preview --url-only` 使用已保存的构建方式，预构建镜像复用成品，源码发布会在服务器重建。请求中断时沿用 stderr 中的 `--request-id`，不要重新生成请求。
+Next.js / Vite 项目可在预检和部署时同时加 `--preset nextjs` / `--preset vite`，或在 `poteto.json` 指定 `preset`。保留已有目录和锁文件。只有用户明确选择服务器源码构建时，才省略 `--local-build`。预览变量操作需用户已授予的 `previews:env` 或管理凭据 `env:write`，不要擅自扩权；`poteto redeploy <预览 URL> --preview --url-only` 使用已保存的构建方式，预构建镜像复用成品，源码发布会在服务器重建。请求中断时沿用 stderr 中的 `--request-id`，不要重新生成请求。
 
 ## 配额不足时先查看占用
 
@@ -68,4 +68,13 @@ Next.js / Vite 项目可在预检和部署时同时加 `--preset nextjs` / `--pr
 
 `poteto prune --project "$PROJECT_ID" --json` 只预览清理候选，默认保留最新三个就绪预览和最近七天的版本；生产、曾用于发布/回滚的版本、绑定数据库或卷的预览不会入选。删除须取得用户对具体 ID 的授权，再用同一筛选条件执行 `poteto prune --project "$PROJECT_ID" --yes --ids ID1 ID2 --json`。中断后重复原 ID 列表，不扩大选择。部署专用 token 没有清理权限；不要擅自扩权或替用户启用 `login --manage-previews`，应由用户使用管理凭据执行。
 
-新个人项目若显示 `preview_mode: "isolated"`，只接收本地构建的静态成品或无状态预览镜像，不会退回服务器源码编译或租户 VM。镜像默认 256 MiB、0.1 vCPU、自动休眠；以远端预检的 `configuration` 为准，保留用户显式配置。此通道没有出站网络、数据库或卷，不要为进入通道删除这些需求；需要它们时沿用已支持的托管项目。
+新个人项目若显示 `preview_mode: "isolated"`，只接收本地构建的静态成品或无状态预览镜像，不会退回服务器源码编译或租户 VM。镜像默认 256 MiB、0.1 vCPU、自动休眠；以远端预检的 `configuration` 为准，保留用户显式配置。此通道不支持数据库或卷，不要为进入通道删除这些需求。出站网络默认关闭；外部 API 需求按下节检查，持久数据需求沿用已支持的托管项目。
+
+
+## 外部 API 和预览环境变量
+
+`poteto doctor` 的 `capabilities.preview_environment` 与 `web_egress` 区分已有权限和平台支持。普通部署 token 不自动拥有这些权限。用户需要时可自行执行 `poteto login --manage-env --allow-web`；不代替用户扩大授权。
+
+使用已有的预览环境权限，以目录外文件、标准输入或隐藏交互设置值，例如 `poteto env set API_KEY --file /secure/api-key.txt --target preview`。只检查返回的变量名，不读取、输出或编进镜像；变更仅用于新部署。获得部署权限的应用代码能使用对应运行时变量，因此不能把不可信代码与敏感运行时值混用。
+
+只有需求包含调用外部服务、平台已启用且 token 有 `previews:web` 时，才在动态应用配置中设置 `"outbound_network": "web"`，然后重新预检。它允许公共 IPv4 HTTP/HTTPS（80/443）及指定 DNS，不允许内网、云元数据、任意端口、IPv6或其他沙箱。它不是域名白名单。缺少权限或网络能力时说明缺项，不改用管理 token、不移除真实需求后宣称完成。

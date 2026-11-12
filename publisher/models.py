@@ -21,6 +21,7 @@ class DeploymentInput(Input):
     port: int = Field(default=3000, ge=1024, le=65535)
     health_check: str = "/"
     sleep: bool = False
+    outbound_network: Literal["none", "web"] = "none"
     memory_mb: int = Field(default=256, ge=64, le=1024)
     cpus: float = Field(default=0.5, ge=0.1, le=1)
     database_id: str | None = Field(default=None, pattern=r'^[a-f0-9]{24}$')
@@ -30,6 +31,8 @@ class DeploymentInput(Input):
 
     @model_validator(mode='after')
     def data_requirements(self):
+        if self.runtime == 'static' and self.outbound_network != 'none':
+            raise ValueError('Static files do not have an outbound network')
         if self.runtime == 'static' and (self.database_id or self.volume_id or self.migration_command):
             raise ValueError('Data resources require a dynamic runtime')
         if self.runtime == 'image' and (self.build_command is not None or self.start_command is not None
@@ -48,6 +51,8 @@ class DeploymentInput(Input):
         for key in ['database_id', 'volume_id', 'migration_command']:
             if value[key] is None:
                 del value[key]
+        if value["outbound_network"] == "none":
+            del value["outbound_network"]
         return value
 
     @field_validator("output_directory", "dockerfile")

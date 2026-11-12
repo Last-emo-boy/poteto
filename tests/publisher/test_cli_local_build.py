@@ -76,6 +76,16 @@ class LocalImageBuildTests(unittest.TestCase):
         self.assertFalse(Path(observed[0][-1]).exists())
         self.assertEqual(["docker", "image", "rm", "--no-prune", "--", observed[0][observed[0].index("--tag") + 1]], observed[1])
 
+    def test_web_policy_survives_local_image_packaging(self):
+        self.node()
+        (self.root/'poteto.json').write_text('{"runtime":"node","outbound_network":"web"}')
+        with patch("publisher.cli_prebuilt.shutil.which",return_value="docker"), \
+             patch("publisher.cli_prebuilt.subprocess.run",return_value=SimpleNamespace(returncode=0)), \
+             patch("publisher.cli_prebuilt.package_image",side_effect=self.package):
+            report,_=build_local(self.root,None,self.credential)
+        self.assertEqual('web',report['configuration']['outbound_network'])
+        self.assertEqual('image',report['configuration']['runtime'])
+
     def test_custom_dockerfile_path_is_not_shell_interpreted(self):
         (self.root / "docker files").mkdir()
         recipe = "FROM scratch\nCOPY server /server\n"

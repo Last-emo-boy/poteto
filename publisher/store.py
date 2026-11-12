@@ -25,9 +25,12 @@ def encode(value):
 
 PREVIEW_SCOPE = "deployments:preview"
 PREVIEW_MANAGE_SCOPE = "previews:manage"
+PREVIEW_ENV_SCOPE = "previews:env"
+PREVIEW_WEB_SCOPE = "previews:web"
+PREVIEW_SCOPES = {PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE, PREVIEW_ENV_SCOPE, PREVIEW_WEB_SCOPE}
 ARTIFACT_DRIVER = "static-artifact"
 SANDBOX_DRIVER = "gvisor"
-SCOPES = {"projects:read", "projects:write", "deployments:read", "deployments:write", "env:write", "databases:write", "storage:write", "tokens:write", "exports:write", "imports:write", PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE}
+SCOPES = {"projects:read", "projects:write", "deployments:read", "deployments:write", "env:write", "databases:write", "storage:write", "tokens:write", "exports:write", "imports:write", PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE, PREVIEW_ENV_SCOPE, PREVIEW_WEB_SCOPE}
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS accounts (
  id TEXT PRIMARY KEY, name TEXT UNIQUE NOT NULL, enabled INTEGER NOT NULL DEFAULT 1,
@@ -402,6 +405,12 @@ class Store:
             driver = ARTIFACT_DRIVER
         elif self.settings.sandbox_enabled(project_id, config, personal=personal):
             driver = SANDBOX_DRIVER
+        if config.get('outbound_network', 'none') != 'none':
+            if config['outbound_network'] != 'web' or driver != SANDBOX_DRIVER:
+                raise Problem(422, 'Web egress is supported only by sandbox previews')
+            if not self.settings.sandbox_web:
+                raise Problem(503, 'Web egress is not enabled on this platform')
+            self.permit(actor, PREVIEW_WEB_SCOPE if PREVIEW_SCOPE in actor['scopes'] else 'deployments:write', project_id)
         self.check_runtime_capacity(db, actor["account_id"], config, driver=driver)
         from publisher.data_store import DataStore
         environment = DataStore(self).bind_resources(db, project_id, config, self.environment(project, config['target']))
@@ -453,11 +462,17 @@ class Store:
         defaults = {'cpus': 0.1, 'sleep': True} if project['preview_mode'] == 'isolated' and model.runtime == 'image' else {}
         return model.configuration(defaults=defaults)
 
+    def environment_project(self, db, actor, project_id, target):
+        if target == 'preview' and PREVIEW_SCOPE in actor['scopes']:
+            self.permit(actor, PREVIEW_ENV_SCOPE, project_id)
+            return self.project(db, actor, project_id, 'env:write', allow_preview=True)
+        return self.project(db, actor, project_id, 'env:write')
+
     def patch_environment(self, actor, project_id, values, remove, target):
         from pydantic import ValidationError
         from publisher.models import EnvironmentInput
         with self.connection() as db:
-            project = self.project(db, actor, project_id, "env:write")
+            project = self.environment_project(db, actor, project_id, target)
             current = self.environment(project, target)
             current.update(values)
             for key in remove:

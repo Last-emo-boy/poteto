@@ -8,7 +8,7 @@ import re
 import socket
 import subprocess
 import tarfile
-from execution import sandbox_wake
+from execution import sandbox_network, sandbox_wake
 
 RUNTIME = "io.containerd.runsc.v1"
 PORTS = sandbox_wake.APP_PORTS
@@ -40,6 +40,8 @@ def inspect(kind, name):
 
 def validate(spec):
     memory, cpu, port, env = (spec.get(k) for k in ("memory_mb", "cpus", "port", "environment"))
+    if spec.get('outbound_network', 'none') not in ('none', 'web'):
+        raise ValueError('Invalid sandbox outbound network policy')
     if (type(memory) is not int or not 256 <= memory <= 1024
             or type(cpu) not in (int, float) or not math.isfinite(cpu) or not 0.1 <= cpu <= 1
             or type(port) is not int or not 1024 <= port <= 65535
@@ -112,7 +114,7 @@ class DockerSocket(http.client.HTTPConnection):
         self.sock.connect("/var/run/docker.sock")
 
 
-def create(name, image, port, host_port, memory, cpu, env, ownership, *, wake=None):
+def create(name, image, port, host_port, memory, cpu, env, ownership, *, wake=None, dns=None):
     key = f"{port}/tcp"
     body = {
         "Image": image, "User": "10001:10001", "Tty": True,
@@ -123,7 +125,7 @@ def create(name, image, port, host_port, memory, cpu, env, ownership, *, wake=No
         "ExposedPorts": {key: {}}, "Healthcheck": {"Test": ["NONE"]},
         "HostConfig": {
             "Runtime": RUNTIME, "CgroupParent": "paas-sandbox.slice", "NetworkMode": name,
-            "Dns": ["127.0.0.1"], "PortBindings": {key: [{"HostIp": "127.0.0.1", "HostPort": str(host_port)}]},
+            "Dns": dns or ["127.0.0.1"], "PortBindings": {key: [{"HostIp": "127.0.0.1", "HostPort": str(host_port)}]},
             "ReadonlyRootfs": True, "CapDrop": ["ALL"], "SecurityOpt": ["no-new-privileges"],
             "Tmpfs": {"/tmp": "rw,noexec,nosuid,size=67108864"},
             "NanoCpus": round(cpu * 10**9), "Memory": memory * 1024**2, "MemorySwap": memory * 1024**2,
@@ -154,6 +156,8 @@ def observe(container, spec):
     memory, cpu, port, _ = validate(spec)
     if limits["Runtime"] != RUNTIME or not limits["ReadonlyRootfs"] or limits["Privileged"]:
         raise ValueError("Effective sandbox configuration does not match")
+    if spec.get('outbound_network') == 'web' and limits.get('Dns') != spec['dns']:
+        raise ValueError('Sandbox DNS configuration does not match')
     if spec.get("sleep"):
         mounts = container.get("Mounts", [])
         test = ["CMD", "/poteto-healthcheck", f"http://127.0.0.1:{port}" + spec["health_check"]]
@@ -230,6 +234,10 @@ def operation(root, config, release, body, build_status):
         if not personal and config.get("sandbox_projects", {}).get(project) != account:
             raise ValueError("Project is not authorized for sandbox previews")
         memory, cpu, port, env = validate(body)
+        outbound = body.get('outbound_network', 'none')
+        if outbound == 'web' and config.get('sandbox_web') is not True:
+            raise ValueError('Sandbox web egress is not enabled')
+        dns = sandbox_network.dns_servers(config) if outbound == 'web' else None
         wake = sandbox_wake.options(release, body)
         if wake and ((not personal and config.get("sandbox_sleep_projects", {}).get(project) != account)
                      or not sandbox_wake.HEALTHCHECK.is_file()):
@@ -239,6 +247,8 @@ def operation(root, config, release, body, build_status):
         image = "paas-release:" + release
         status = build_status(release)
         driver = status.get("driver")
+        if spec.get('outbound_network', 'none') != outbound:
+            raise ValueError('Sandbox network policy does not match its owned build receipt')
         if personal and (driver != 'prebuilt' or spec.get('personal_preview') is not True):
             raise ValueError('Personal previews require an owned prebuilt image receipt')
         source = ((driver == "native" and spec.get("runtime") in {"node", "dockerfile"})
@@ -259,10 +269,12 @@ def operation(root, config, release, body, build_status):
             if inspect("container", name) or inspect("network", name):
                 raise ValueError("Sandbox name is already in use")
             receipt = {"account_id": account, "project_id": project, "host_port": host_port}
-            receipt |= {'memory_mb': memory, 'cpus': cpu, 'personal_preview': personal}
+            receipt |= {'memory_mb': memory, 'cpus': cpu, 'personal_preview': personal, 'outbound_network': outbound}
             if wake:
                 receipt["wake"] = wake
             save(path, receipt)
+        if receipt.get('outbound_network', 'none') != outbound:
+            raise ValueError('Sandbox network policy does not match its receipt')
         if receipt.get("wake") != wake:
             raise ValueError("Sandbox wake configuration does not match its receipt")
         if (receipt.get('personal_preview', False) != personal or receipt.get('memory_mb', memory) != memory
@@ -278,6 +290,8 @@ def operation(root, config, release, body, build_status):
             owned(network["Labels"], expected)
             if network["Options"].get("com.docker.network.bridge.name") != bridge:
                 raise ValueError("Sandbox is attached to an unexpected bridge")
+        if config.get('sandbox_web') or outbound == 'web':
+            sandbox_network.configure(root, config)
         container = inspect("container", name)
         if container is None:
             archive_path = build / "image.tar"
@@ -301,13 +315,13 @@ def operation(root, config, release, body, build_status):
             if wake and any(k.startswith(("sablier.", "sablierapp.dev/", "com.docker.compose."))
                             for k in metadata["Config"].get("Labels", {}) or {}):
                 raise ValueError("Sleeping sandbox images cannot supply lifecycle labels")
-            create(name, metadata["Id"], port, receipt["host_port"], memory, cpu, env, expected, wake=wake)
+            create(name, metadata["Id"], port, receipt["host_port"], memory, cpu, env, expected, wake=wake, dns=dns)
             container = inspect("container", name)
         owned(container["Config"]["Labels"], expected)
         if not container["State"]["Running"]:
             docker("start", name, timeout=45)
         try:
-            observe(inspect("container", name), body | {"host_port": receipt["host_port"]})
+            observe(inspect("container", name), body | {"host_port": receipt["host_port"], "dns": dns})
         except Exception:
             docker("stop", "-t", "2", name)
             raise
@@ -348,5 +362,7 @@ def operation(root, config, release, body, build_status):
             if effective not in image_ids:
                 raise ValueError("Refusing to delete an image without an ownership receipt")
             docker("image", "rm", image)
+    if config.get('sandbox_web') or receipt.get('outbound_network') == 'web':
+        sandbox_network.configure(root, config, exclude=release)
     path.unlink()
     return {"deleted": True}

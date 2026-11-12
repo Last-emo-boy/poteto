@@ -27,6 +27,7 @@ class Settings:
     personal_previews: bool = False
     sandbox_memory_limit_mib: int = 2048
     sandbox_cpu_limit: float = 1.5
+    sandbox_web: bool = False
 
     def __post_init__(self):
         if not valid_domain(self.domain):
@@ -51,6 +52,8 @@ class Settings:
 
         if type(self.static_source_builds) is not bool:
             raise ValueError('static_source_builds must be a boolean')
+        if type(self.sandbox_web) is not bool:
+            raise ValueError('sandbox_web must be a boolean')
         if type(self.personal_previews) is not bool:
             raise ValueError('personal_previews must be a boolean')
         if type(self.sandbox_memory_limit_mib) is not int or not 256 <= self.sandbox_memory_limit_mib <= 16384:
@@ -97,7 +100,8 @@ class Settings:
                    prebuilt_image_projects=runtime.get('prebuilt_image_projects', ()),
                    personal_previews=runtime.get('personal_previews', False),
                    sandbox_memory_limit_mib=runtime.get('sandbox_memory_limit_mib', 2048),
-                   sandbox_cpu_limit=runtime.get('sandbox_cpu_limit', 1.5))
+                   sandbox_cpu_limit=runtime.get('sandbox_cpu_limit', 1.5),
+                   sandbox_web=runtime.get('sandbox_web', False))
 
     @property
     def sandbox_limits(self):

@@ -265,6 +265,8 @@ class Dokploy:
         wake = {'sleep': True, 'hostname': self.hostname(deployment), 'health_check': config['health_check']} if config['sleep'] else {}
         if personal:
             wake['personal_preview'] = True
+        if config.get('outbound_network') == 'web':
+            wake['outbound_network'] = 'web'
         record = self.sandbox_action(deployment, 'start', port=port, memory_mb=config['memory_mb'],
                                      cpus=config['cpus'], environment=self.runtime_environment(deployment, port), **wake)
         check()
@@ -543,6 +545,8 @@ class Dokploy:
             build = {k:config[k] for k in ['runtime','build_command','start_command','output_directory','dockerfile'] if k in config}
             if imported and imported['image_path'] is not None:
                 build={'runtime':'image-import','image_reference':imported['reference']};archive=imported['image_path']
+            if config.get('outbound_network') == 'web':
+                build['outbound_network'] = 'web'
             if native_only:
                 build['require_native'] = True
             if static:

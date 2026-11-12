@@ -4,7 +4,8 @@ After=network.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/sbin/nft -f /opt/paas-execution/infra/execution/paas-sandbox.nft
+WorkingDirectory=/opt/paas-execution
+ExecStart=/usr/bin/python3 -m execution.sandbox_network
 RemainAfterExit=yes
 
 [Install]

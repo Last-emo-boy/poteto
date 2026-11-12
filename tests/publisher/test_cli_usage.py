@@ -79,3 +79,20 @@ class UsageCliTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError,'does not support'):
                     cli_login.login(client,Path(folder)/'other.json',manage_previews=True)
                 browser.assert_not_called()
+
+
+class PreviewLoginOptionTests(unittest.TestCase):
+    def test_explicit_options_are_sent_only_after_capability_check(self):
+        with tempfile.TemporaryDirectory() as directory:
+            client = Mock(url='https://deploy.example.test')
+            client.request.side_effect = [
+                {'issuer':ISSUER,'client_id':'client','preview_environment':True,'web_egress':True},
+                {'token':'synthetic-token','project_id':'a'*24}]
+            with patch.object(cli_login,'authorize',return_value={'code':'code','verifier':'v','nonce':'n'}):
+                cli_login.login(client,Path(directory)/'token.json',manage_env=True,allow_web=True)
+            self.assertEqual({'code':'code','verifier':'v','nonce':'n','manage_env':True,'allow_web':True},client.request.call_args.args[2])
+            client.request.side_effect = [{'issuer':ISSUER,'client_id':'client'}]
+            with patch.object(cli_login,'authorize') as browser, self.assertRaisesRegex(RuntimeError,'permission'):
+                cli_login.login(client,Path(directory)/'unsupported.json',allow_web=True)
+            browser.assert_not_called()
+            self.assertFalse((Path(directory)/'unsupported.json').exists())

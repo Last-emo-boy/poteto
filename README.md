@@ -110,6 +110,25 @@ Changes apply to the runtime of new deployments. `redeploy` rebuilds the origina
 
 The CLI prints a request ID to stderr. If a request is interrupted, repeat with `--request-id THE_SAME_ID` to resume the same candidate rather than creating another. `--no-wait` returns the queued candidate; `inspect` and `logs` can observe it later. `retry` remains the command for resuming a failed candidate in place.
 
+## Let a preview call external APIs
+
+Default Agent tokens still deploy only. Request the permissions you need explicitly during login, keeping the resulting credential outside the application directory:
+
+```sh
+poteto login --manage-env --allow-web
+poteto env set API_KEY --file /secure/api-key.txt --target preview
+```
+
+`--manage-env` grants `previews:env` for the login's project, not production environment access. The environment API returns variable names, never values. Values are encrypted at rest and captured for new deployments; updating a variable does not change a running release. Deployment permission lets application code consume that release's variables, so give Agent deployment credentials only to code you trust with those values.
+
+`--allow-web` grants `previews:web`. Opt a dynamic preview into networking in `poteto.json`:
+
+```json
+{"runtime":"node","outbound_network":"web"}
+```
+
+Then use `poteto deploy . --local-build --preview`. Web egress permits public IPv4 TCP ports 80/443 and the operator's DNS resolvers. Host access, private/reserved ranges, cloud metadata, arbitrary ports, IPv6 and cross-sandbox connections stay blocked. It is not a destination-domain allowlist: treat a web-enabled application as able to send its own data to public websites. Omitting the setting keeps the previous no-egress behavior. A web token does not grant environment editing or cleanup; the login options are independent. Missing platform support or permission fails preflight without creating a deployment or falling back to another runtime.
+
 ## Build and publish without compiling on the server
 
 ```sh
@@ -117,7 +136,7 @@ poteto plan . --preview --json
 poteto deploy . --local-build --preview --url-only
 ```
 
-`--local-build` builds on the client, checks the actual artifact against server permissions and quotas, then uploads only that artifact. Static projects use local npm; Node projects and Dockerfile projects use your Docker context to build a `linux/amd64` image. Dynamic projects need Docker Engine API 1.48+, Buildx and the server's existing `prebuilt_image_projects` opt-in. A failed local build or preflight creates no deployment and never falls back to server compilation. Ordinary `deploy` retains its existing source-build behavior.
+`--local-build` builds on the client, checks the actual artifact against server permissions and quotas, then uploads only that artifact. Static projects use local npm; Node projects and Dockerfile projects use your Docker context to build a `linux/amd64` image. Dynamic projects need Docker Engine API 1.48+, Buildx and image support shown by `poteto doctor`; new personal projects have it, while legacy projects keep their `prebuilt_image_projects` opt-in. A failed local build or preflight creates no deployment and never falls back to server compilation. Ordinary `deploy` retains its existing source-build behavior.
 
 Build trusted projects only. The image context follows Poteto's upload exclusions, including `.env*`, credentials, `.git`, `.poteto` and `node_modules`. Build output goes to stderr; `--url-only` keeps stdout suitable for automation. Temporary image tags are removed after packaging; Docker's build cache remains for the next build. Use a local Docker context or an independent CI runner to keep compilation off the publishing server.
 
@@ -135,7 +154,7 @@ poteto deploy . --prebuilt --preview --url-only
 
 ## Publish a prebuilt dynamic image
 
-For a Node or Dockerfile project enabled in `prebuilt_image_projects`, build locally or in CI and publish the resulting image without server-side compilation:
+For a personal project, or a managed Node/Dockerfile project enabled in `prebuilt_image_projects`, build locally or in CI and publish the resulting image without server-side compilation:
 
 ```sh
 poteto build .
@@ -152,7 +171,7 @@ poteto plan . --prebuilt-image .poteto/image.tar.gz --json
 poteto deploy . --prebuilt-image .poteto/image.tar.gz --preview --url-only
 ```
 
-Use Docker Engine with API 1.48 or newer for platform-specific image export. Poteto accepts a single image (128 MiB compressed, 512 MiB expanded); build a lean final image. Use the image's entrypoint and listen on `0.0.0.0:$PORT` as UID 10001. Runtime settings such as the health check and database binding come from `poteto.json` or `--config`, not from build flags. The image is loaded only into the project's existing isolated tenant runtime. Existing source deployments are unchanged.
+Use Docker Engine with API 1.48 or newer for platform-specific image export. Poteto accepts a single image (128 MiB compressed, 512 MiB expanded); build a lean final image. Use the image's entrypoint and listen on `0.0.0.0:$PORT` as UID 10001. Runtime settings such as the health check and database binding come from `poteto.json` or `--config`, not from build flags. Personal previews run in gVisor; managed projects retain their existing isolated tenant runtime. Existing source deployments are unchanged.
 
 The [Next.js + PostgreSQL fixture](fixtures/next-postgres) uses standalone output, runtime-only database credentials, and an idempotent migration. Its image is built and exercised by the dedicated SSR acceptance workflow.
 
@@ -189,9 +208,11 @@ In the IF.Link login configuration pointed to by `PAAS_OIDC_CONFIG_FILE`, set `"
 
 On a provisioned executor, set `personal_previews: true` in both the publisher runtime configuration and the executor configuration. **New** IF.Link enrollments then receive an `isolated` personal project. Existing projects and releases retain their original mode. `poteto doctor` exposes the selected project's capabilities, and remote preflight returns the effective configuration.
 
-Personal projects accept locally built static output and prebuilt, stateless `linux/amd64` preview images. They do not run source builds, allocate databases/volumes, import production bundles, or silently fall back to a VM. Images default to 256 MiB, 0.1 vCPU and idle sleep; explicitly supplied resources and sleep settings are preserved. The current network policy denies outbound access. Use an existing managed project for workloads requiring persistent data, outbound networking or production image deployment.
+Personal projects accept locally built static output and prebuilt, stateless `linux/amd64` preview images. They do not run source builds, allocate databases/volumes, import production bundles, or silently fall back to a VM. Images default to 256 MiB, 0.1 vCPU and idle sleep; explicitly supplied resources and sleep settings are preserved. Outbound access is off unless both the token and deployment opt into web egress. Use an existing managed project for workloads requiring persistent data or production image deployment.
 
 The shared pool has 64 private ingress slots. Its default remains 2 GiB / 1.5 vCPU. To change it, set the same `sandbox_memory_limit_mib` and `sandbox_cpu_limit` in publisher and executor configurations, and apply matching `MemoryMax`, `MemorySwapMax=0` and `CPUQuota` values to `paas-sandbox.slice`. The executor checks effective cgroup limits and stored reservations before admitting a personal preview. Keep headroom for the controller, existing tenant VMs and the host; do not size this pool from currently free RAM alone. The controller's persistent loopback filter and executor egress policy must allow `23000–23063` and the wake proxy at `23100`.
+
+To enable web egress on an existing installation, deploy `execution/sandbox_network.py` and the updated `paas-sandbox-network.service`, then set `sandbox_web: true` in both publisher and executor configurations. The network service reconciles its own nftables table from persisted sandbox receipts on restart. Set `sandbox_dns` in the executor to one to three reachable public IPv4 resolvers when the defaults are unsuitable. Disabling the switch and restarting that service withdraws web access; it does not grant a less isolated fallback or change application ingress. Existing offline receipts stay offline. Keep the older static `paas-sandbox.nft` only as a deny-all fallback, not as the web-enabled service's entry point.
 
 A stopped preview retains its reservation so simultaneous wake-ups cannot overbook the pool. The per-project cleanup and usage commands help reclaim old reservations; a high project count does not imply that every project can run a large dynamic application concurrently.
 

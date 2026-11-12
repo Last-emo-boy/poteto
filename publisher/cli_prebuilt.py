@@ -224,7 +224,7 @@ def read_image(directory: Path, artifact: Path, config: Path | None, credential_
         raise PlanError("invalid_json", "Deployment config must contain a valid JSON object.") from None
     if not isinstance(config, dict):
         raise PlanError("invalid_json", "Deployment config must contain a JSON object.")
-    runtime_fields = ("port", "health_check", "sleep", "memory_mb", "cpus", "database_id", "volume_id", "migration_command")
+    runtime_fields = ("port", "health_check", "sleep", "outbound_network", "memory_mb", "cpus", "database_id", "volume_id", "migration_command")
     spec = {k: config[k] for k in runtime_fields if k in config}
     spec |= {"runtime": "image", "target": "production" if production else "preview"}
     return {"ok": True, "directory": str(root), "origin": "prebuilt-image", "runtime": "image",

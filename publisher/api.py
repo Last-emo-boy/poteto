@@ -14,7 +14,7 @@ from publisher.archive import ArchiveError, unpack
 from publisher.config import Settings
 from publisher.http_limits import ControlLimits
 from publisher.models import PreflightInput, DeploymentInput, EnvironmentInput, EnvironmentPatchInput, ProjectInput, ReleaseInput, TokenInput
-from publisher.store import PREVIEW_MANAGE_SCOPE, PREVIEW_SCOPE, SANDBOX_DRIVER, Problem, SCOPES, Store, encode, ident
+from publisher.store import PREVIEW_ENV_SCOPE, PREVIEW_WEB_SCOPE, PREVIEW_SCOPES, PREVIEW_MANAGE_SCOPE, PREVIEW_SCOPE, SANDBOX_DRIVER, Problem, SCOPES, Store, encode, ident
 
 bearer = HTTPBearer(auto_error=False)
 
@@ -119,8 +119,8 @@ def create_app(settings=None):
         scopes = set(body.scopes)
         if not scopes or not scopes <= SCOPES | {"*"}:
             raise Problem(422, "Unknown or empty token scopes")
-        if scopes & {PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE} and (
-                scopes not in ({PREVIEW_SCOPE}, {PREVIEW_SCOPE, PREVIEW_MANAGE_SCOPE}) or not body.project_ids):
+        if scopes & PREVIEW_SCOPES and (
+                PREVIEW_SCOPE not in scopes or not scopes <= PREVIEW_SCOPES or not body.project_ids):
             raise Problem(422, "A preview token requires explicit project IDs and no other scopes")
         if "*" not in user["scopes"] and not scopes <= set(user["scopes"]):
             raise Problem(403, "A token cannot grant more permissions than its issuer")
@@ -183,7 +183,11 @@ def create_app(settings=None):
                 'stateless_preview_driver': 'gvisor' if settings.sandbox_enabled(project_id, image, personal=personal) else None,
                 'image_defaults': {'memory_mb': 256, 'cpus': 0.1, 'sleep': True} if personal else None,
                 'sandbox_pool': settings.sandbox_limits,
-                'limitations': ['No outbound network', 'No database or volume binding', 'Image previews only; no VM fallback'] if personal else []}
+                'preview_environment': bool({'*', 'env:write', PREVIEW_ENV_SCOPE} & set(user['scopes'])),
+                'web_egress': {'enabled': settings.sandbox_web,
+                               'authorized': bool({'*', 'deployments:write', PREVIEW_WEB_SCOPE} & set(user['scopes'])),
+                               'ports': [80, 443], 'private_networks': False},
+                'limitations': ['Outbound network requires explicit web permission', 'No database or volume binding', 'Image previews only; no VM fallback'] if personal else []}
 
     @app.patch('/v1/projects/{project_id}',tags=['Projects'])
     def rename_project(project_id: str,body: ProjectInput,user=Depends(actor)):
@@ -197,7 +201,7 @@ def create_app(settings=None):
     @app.put("/v1/projects/{project_id}/env", tags=["Projects"])
     def put_environment(project_id: str, body: EnvironmentInput, target: Literal['production','preview'] = 'production', user=Depends(actor)):
         with store.connection() as db:
-            store.project(db, user, project_id, "env:write")
+            store.environment_project(db, user, project_id, target)
             column = "preview_environment" if target == "preview" else "environment"
             db.execute(f"UPDATE projects SET {column}=? WHERE id=?", (store.seal(body.values), project_id))
             store.audit(db, user, "environment.replace.preview" if target == "preview" else "environment.replace", project_id)
@@ -206,7 +210,7 @@ def create_app(settings=None):
     @app.get("/v1/projects/{project_id}/env", tags=["Projects"])
     def environment_keys(project_id: str, target: Literal['production','preview'] = 'production', user=Depends(actor)):
         with store.connection() as db:
-            project = store.project(db, user, project_id, "env:write")
+            project = store.environment_project(db, user, project_id, target)
         return {"keys": sorted(store.environment(project,target))}
 
     @app.patch("/v1/projects/{project_id}/env", tags=["Projects"])
