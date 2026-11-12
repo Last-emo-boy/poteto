@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import re
 import ssl
+import sys
 import time
 import urllib.error
 
@@ -104,6 +105,9 @@ def transfer(client, release, source):
     if type(limit) is not int or not 1 <= limit <= 8 * 1024**2:
         raise RuntimeError("Invalid upload part limit returned by server")
     offset = status["received"]
+    total = len(source) / 1024**2
+    print(f"Uploading {total:.1f} MiB; resuming at {offset / 1024**2:.1f} MiB", file=sys.stderr, flush=True)
+    progress = offset * 10 // len(source)
     while offset < len(source):
         end = min(offset + limit, len(source))
         for attempt in range(3):
@@ -123,5 +127,10 @@ def transfer(client, release, source):
                 if status["received"] != offset:
                     raise RuntimeError("Upload offset changed unexpectedly") from None
         offset = end
+        current = offset * 10 // len(source)
+        if current != progress:
+            print(f"Uploaded {offset / 1024**2:.1f} / {total:.1f} MiB", file=sys.stderr, flush=True)
+            progress = current
     # A lost completion reply is safe to replay on an explicit --resume.
+    print("Verifying uploaded artifact on the server", file=sys.stderr, flush=True)
     checked(client.request("POST", base + "/complete", timeout=180))
