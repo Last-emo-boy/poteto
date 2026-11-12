@@ -6,10 +6,28 @@ import unittest
 from unittest.mock import patch
 from types import SimpleNamespace
 
-from execution.database_storage import DatabaseStorage, atomic_json
+from execution.database_storage import DatabaseStorage, atomic_json, run
 
 
 class DatabaseStorageTests(unittest.TestCase):
+    def test_mount_operations_use_host_namespace_when_service_is_isolated(self):
+        for action in ('mount', 'umount'):
+            with patch('execution.database_storage.os.readlink',side_effect=['mnt:[2]','mnt:[1]']), \
+                 patch('execution.database_storage.subprocess.check_output',return_value='') as call:
+                run(action,'/owned/path')
+                self.assertEqual(['nsenter','--mount=/proc/1/ns/mnt','--',action,'/owned/path'],call.call_args.args[0])
+
+    def test_host_recovery_and_non_mount_commands_do_not_enter_a_namespace(self):
+        with patch('execution.database_storage.os.readlink',return_value='mnt:[1]'), \
+             patch('execution.database_storage.subprocess.check_output',return_value='') as call:
+            run('mount','/owned/path')
+            self.assertEqual(['mount','/owned/path'],call.call_args.args[0])
+        with patch('execution.database_storage.os.readlink') as namespace, \
+             patch('execution.database_storage.subprocess.check_output',return_value='') as call:
+            run('blkid','/owned/image')
+            namespace.assert_not_called()
+            self.assertEqual(['blkid','/owned/image'],call.call_args.args[0])
+
     def setUp(self):
         temporary = tempfile.TemporaryDirectory(); self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)

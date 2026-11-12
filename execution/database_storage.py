@@ -12,7 +12,12 @@ ID = re.compile(r'[a-f0-9]{24}')
 
 
 def run(*args):
-    return subprocess.check_output(args, stderr=subprocess.PIPE, text=True, timeout=60).strip()
+    command = list(args)
+    if args[0] in {'mount', 'umount'} and os.readlink('/proc/self/ns/mnt') != os.readlink('/proc/1/ns/mnt'):
+        # ProtectHome gives the API a slave mount namespace. Docker needs the
+        # same durable mount as host recovery services, not an API-private one.
+        command = ['nsenter', '--mount=/proc/1/ns/mnt', '--', *command]
+    return subprocess.check_output(command, stderr=subprocess.PIPE, text=True, timeout=60).strip()
 
 
 def atomic_json(path, value):
