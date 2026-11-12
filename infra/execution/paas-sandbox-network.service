@@ -6,6 +6,7 @@ After=network.target
 Type=oneshot
 WorkingDirectory=/opt/paas-execution
 ExecStart=/usr/bin/python3 -m execution.sandbox_network
+ExecReload=/usr/bin/python3 -m execution.sandbox_network
 RemainAfterExit=yes
 
 [Install]
