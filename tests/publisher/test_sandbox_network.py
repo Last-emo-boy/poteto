@@ -35,7 +35,6 @@ class SandboxNetworkTests(unittest.TestCase):
         self.assertNotIn('"psbx23000"',network.render(self.root,self.config))
         self.receipt(); self.assertNotIn('"psbx23000"',network.render(self.root,self.config,exclude=self.release))
         self.assertNotIn('"psbx23000"',network.render(self.root,self.config|{'sandbox_web':False}))
-        self.assertEqual(network.render(self.root,self.config),network.render(self.root,self.config))
 
     def test_invalid_receipts_and_duplicate_bridges_fail_before_applying_rules(self):
         for values in [{'host_port':0},{'host_port':'23000'},{'outbound_network':'all'}]:

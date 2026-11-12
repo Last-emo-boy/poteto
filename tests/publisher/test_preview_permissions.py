@@ -1,13 +1,10 @@
 from dataclasses import replace
-import io
 import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import Mock, patch
 
 from fastapi.testclient import TestClient
-from publisher import cli_login
 from publisher.api import create_app
 from publisher.config import Settings
 from publisher.login_contract import ISSUER
@@ -100,4 +97,3 @@ class PreviewPermissionTests(unittest.TestCase):
         with self.store.connection() as db:
             db.execute("INSERT INTO jobs(id,project_id,kind,state,created,updated) VALUES(?,?,'project-export','queued',0,0)",('f'*24,self.project))
         self.assertEqual(409,client.patch(self.base+'/env?target=preview',json={'values':{'API_KEY':'value'}}).status_code)
-
