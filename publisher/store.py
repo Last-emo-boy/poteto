@@ -344,9 +344,10 @@ class Store:
         if bound is not None:
             return bound["project_id"]
         account_id = ident()
-        db.execute("INSERT INTO accounts(id,name,max_projects,max_concurrent,created) VALUES(?,?,?,1,?)",
+        db.execute("INSERT INTO accounts(id,name,max_projects,max_concurrent,max_storage,created) VALUES(?,?,?,1,?,?)",
                    (account_id, "iflink-" + account_id,
-                    5 if self.settings.personal_previews and self.settings.personal_workspaces else 1, time.time()))
+                    5 if self.settings.personal_previews and self.settings.personal_workspaces else 1,
+                    (1024 if self.settings.personal_previews else 512) * 1024**2, time.time()))
         actor = {"id": None, "account_id": account_id}
         self.audit(db, actor, "account.cli-enroll", account_id)
         project_id = self.insert_project(db, actor, "preview")["id"]
@@ -458,7 +459,7 @@ class Store:
             raise Problem(429, "Release retention quota reached; delete unused releases")
         return driver, environment, account
 
-    def preflight(self, actor, project_id, config, archive_bytes, unpacked_bytes, files):
+    def preflight(self, actor, project_id, config, archive_bytes, unpacked_bytes, files, *, normalized_image_bytes=None):
         with self.connection() as db:
             project = self.project(db, actor, project_id, "deployments:write", allow_preview=config['target'] == 'preview')
             upload_limit, unpack_limit, file_limit = self.settings.upload_limits(config['runtime'])
@@ -466,15 +467,33 @@ class Store:
                 raise Problem(413, "Artifact exceeds this runtime's upload, expansion or file limit")
             driver, _, account = self.deployment_preconditions(db, actor, project, config)
             self.check_upload_capacity(db, config['runtime'])
+            from publisher.image_contract import ARCHIVE_LIMIT
+            if normalized_image_bytes is not None and config['runtime'] != 'image':
+                raise Problem(422, "Normalized image size is only valid for image deployments")
+            if normalized_image_bytes is not None and normalized_image_bytes > ARCHIVE_LIMIT:
+                raise Problem(413, "Estimated normalized image exceeds the image archive limit")
             used = self.storage_used(db, actor['account_id'])
-            if used + archive_bytes + unpacked_bytes > account['max_storage']:
-                raise Problem(429, "Artifact storage quota reached")
+            limit = account['max_storage']
+            estimate = normalized_image_bytes or 0
+            required = archive_bytes + unpacked_bytes + estimate
+            if used + required > limit:
+                def mib(size):
+                    return f"{size / 1024**2:.1f} MiB"
+                raise Problem(429, "Artifact storage quota: "
+                              f"{mib(used)} used / {mib(limit)} limit; "
+                              f"this deployment needs {mib(required)} "
+                              f"(upload {mib(archive_bytes)} + unpacked {mib(unpacked_bytes)}"
+                              + (f" + estimated normalized image {mib(estimate)}" if estimate else "")
+                              + f"); short by {mib(used + required - limit)}. "
+                              "Use a smaller image or request more account storage before uploading.")
             return {"ok": True, "project_id": project_id, "target": config['target'], "runtime_driver": driver,
                     "preview_mode": project['preview_mode'], "configuration": config,
                     "upload": {"archive_bytes": archive_bytes, "unpacked_bytes": unpacked_bytes, "files": files,
                                "limit_bytes": upload_limit, "expansion_limit_bytes": unpack_limit, "file_limit": file_limit},
                     "storage": {"used_bytes": used, "limit_bytes": account['max_storage'],
-                                "remaining_after_upload": account['max_storage'] - used - archive_bytes - unpacked_bytes},
+                                "remaining_after_upload": limit - used - archive_bytes - unpacked_bytes,
+                                "estimated_normalized_image_bytes": normalized_image_bytes,
+                                "required_bytes": required, "remaining_after_deploy_estimate": limit - used - required},
                     "checked_at": time.time()}
 
     def create_deployment(self, actor, project_id, config, key):

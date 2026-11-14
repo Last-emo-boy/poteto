@@ -215,6 +215,14 @@ def _credential_file(url):
     return None
 
 
+def _preflight_artifact(client, project_id, config, report, source):
+    body = {"configuration": config, "archive_bytes": len(source),
+            "unpacked_bytes": report["unpacked_bytes"], "files": report["upload_files"]}
+    if "normalized_image_bytes" in report:
+        body["normalized_image_bytes"] = report["normalized_image_bytes"]
+    return client.request("POST", f"/v1/projects/{project_id}/preflight", body)
+
+
 def _show_plan(args, credential_file, client=None, *, default_preview=False):
     try:
         if args.prebuilt_image:
@@ -234,9 +242,7 @@ def _show_plan(args, credential_file, client=None, *, default_preview=False):
         if client is not None:
             config = config | {"target": config.get("target", "preview" if default_preview else "production")}
             report["target"] = config["target"]
-            report["remote"] = client.request("POST", f"/v1/projects/{args.project}/preflight",
-                {"configuration": config, "archive_bytes": len(source),
-                 "unpacked_bytes": report["unpacked_bytes"], "files": report["upload_files"]})
+            report["remote"] = _preflight_artifact(client, args.project, config, report, source)
     except (RuntimeError, OSError) as error:
         if args.json:
             code = (error.code if isinstance(error, PlanError) else
@@ -703,10 +709,7 @@ def main(prog="poteto"):
                 report, source = build_local(args.directory, args.config, token_file or default_token_file(),
                                              preset=args.preset, production=args.prod)
                 config = report.get("configuration", {"runtime": "static", "target": report["target"]})
-                client.request("POST", f"/v1/projects/{project_id}/preflight", {
-                    "configuration": config, "archive_bytes": len(source),
-                    "unpacked_bytes": report["unpacked_bytes"], "files": report["upload_files"],
-                })
+
             elif args.prebuilt_image:
                 report, source = read_image(args.directory, args.prebuilt_image, args.config,
                                             token_file or default_token_file(), production=args.prod)
@@ -727,6 +730,8 @@ def main(prog="poteto"):
             if len(source) > limit:
                 raise RuntimeError(f"Archive exceeds the server upload limit of {limit // 1024**2} MiB")
             if not resuming:
+                if prog != "paas" and (args.local_build or args.prebuilt_image):
+                    _preflight_artifact(client, project_id, config, report, source)
                 result = client.request("POST", f"/v1/projects/{project_id}/deployments", config)
             resumable = resuming or result.get("resumable_upload_url")
             if resumable and not resuming:

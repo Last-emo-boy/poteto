@@ -9,7 +9,7 @@ description: 用 Poteto CLI 把现有应用目录预检并发布到 Poteto 的 H
 
 ## 安装与凭据
 
-如果没有可用的 Poteto 0.21.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
+如果没有可用的 Poteto 0.22.0 或更新版本，从官方地址安装。需要 Python 3.10+，不需要管理员权限。安装到用户路径，或为任务设置独立的 `POTETO_INSTALL_DIR`，用该目录下的 `poteto` 执行后续命令。
 
 ```sh
 curl -fsSL https://poteto.iflink.tech/install.sh | sh
@@ -48,7 +48,9 @@ poteto plan "$APP_DIR" --prebuilt --remote --project "$PROJECT_ID" --preview --j
 poteto deploy "$APP_DIR" --prebuilt --project "$PROJECT_ID" --preview --url-only
 ```
 
-已有静态成品时，也可以直接部署含 `index.html` 的成品目录，例如 `dist/`。
+已有含 `index.html` 的静态成品（例如 `dist/`）时，可以直接部署该目录。如果用 `--prebuilt`，先运行 `poteto build dist/` 生成归档，再对同一个 `dist/` 执行上面的预检和部署命令；`--prebuilt` 不会现场打包。
+
+同一账号只有一个并发发布槽时，串行执行多条部署：等上一条返回就绪链接，再预检和部署下一条。遇到并发 429 时查看 `poteto usage` 和正在运行的发布，不重复提交。
 
 **动态应用分步构建时：** `poteto build "$APP_DIR"` 可构建 Node 或 Dockerfile 项目；已有可信镜像时用 `poteto build "$APP_DIR" --from-image "$IMAGE"`，不会重建。对同一个应用目录，在 `plan` 和 `deploy` 上都传 `--prebuilt-image "$APP_DIR/.poteto/image.tar.gz"`，预检加 `--remote --project "$PROJECT_ID"`，并继续用 `--preview`。镜像上限为压缩 128 MiB、展开 512 MiB；Next.js 等框架优先用多阶段 Dockerfile 和 standalone 产物。不要把凭据、运行时密钥或数据库内容打进镜像。先以 `poteto doctor` / 远端预检确认项目能力；新版新注册个人项目可默认接收镜像，旧托管项目仍按原开通策略。未开通时说明缺项，不反复提交。
 
@@ -56,6 +58,7 @@ poteto deploy "$APP_DIR" --prebuilt --project "$PROJECT_ID" --preview --url-only
 
 - Node 源码构建需要 npm 锁文件。动态应用须监听 `0.0.0.0` 上平台提供的 `PORT`；非 npm 构建可以使用 Dockerfile。预览数据库或卷由项目所有者预先创建和授权，沿用已有绑定。
 - CLI 0.12.0 配合新版服务端会自动分片上传，并在当前应用的 `.poteto/` 保存不含凭据的待上传成品。若上传中断，在同一目录执行 `poteto deploy . --project "$PROJECT_ID" --resume <发布 ID>`，沿用输出中的 ID；不要重新构建、添加 `--local-build`、更换目标或创建另一个发布。收到服务端已入队确认后，本地待上传副本会自动删除。
+- 镜像远端预检会把上传包、解开外层归档后的文件和预计归一化镜像一起计入账号制品存储。读 `remote.storage.required_bytes` 和 `remaining_after_deploy_estimate`；存储 429 会给出缺口，在上传前缩小镜像或请管理员增加额度。新个人账号默认 1 GiB 制品总额度，单镜像限制仍是压缩 128 MiB、展开 512 MiB。
 - 预检失败时按 JSON 的 `error.code` 和 `error.message` 处理；不要绕过预检或改用生产发布。上传后失败时用 `poteto deployments --project "$PROJECT_ID"` 和 `poteto logs <发布 ID>` 定位，不盲目重复创建发布。
 
 只在 `deploy` 成功且返回的 HTTPS 地址可访问后，才交付预览链接。验证首页或应用实际配置的健康检查路径；验证共享数据时优先使用只读请求。不要把 token 或环境变量值放进回复。

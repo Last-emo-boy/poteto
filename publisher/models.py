@@ -77,6 +77,7 @@ class PreflightInput(Input):
     archive_bytes: int = Field(gt=0)
     unpacked_bytes: int = Field(gt=0)
     files: int = Field(gt=0)
+    normalized_image_bytes: int | None = Field(default=None, gt=0)
 
 
 class EnvironmentInput(Input):

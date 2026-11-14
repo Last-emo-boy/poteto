@@ -38,10 +38,13 @@ class LocalImageBuildTests(unittest.TestCase):
         self.assertTrue(reference.startswith("poteto-local:"))
         self.artifact.parent.mkdir(exist_ok=True)
         with tarfile.open(self.artifact, "w:gz") as archive:
-            body = b"[]"
-            entry = tarfile.TarInfo("manifest.json")
-            entry.size = len(body)
-            archive.addfile(entry, io.BytesIO(body))
+            for name, body in {
+                "manifest.json": b'[{"Config":"config.json","Layers":[]}]',
+                "config.json": b'{"os":"linux","architecture":"amd64","rootfs":{"type":"layers","diff_ids":[]}}',
+            }.items():
+                entry = tarfile.TarInfo(name)
+                entry.size = len(body)
+                archive.addfile(entry, io.BytesIO(body))
 
     def test_node_build_uses_shared_recipe_sanitized_context_and_runtime_defaults(self):
         self.node()
@@ -124,20 +127,25 @@ class LocalImageBuildTests(unittest.TestCase):
                 build_local(self.root, None, self.credential)
         self.assertEqual(["docker", "image", "rm", "--no-prune", "--"], run.call_args.args[0][:-1])
 
-    def test_local_deploy_preflights_image_before_creating_a_release(self):
+    def test_image_deploy_stops_before_creation_for_both_build_paths(self):
         config = {"runtime": "image", "target": "preview", "memory_mb": 512}
-        report = {"configuration": config, "target": "preview", "unpacked_bytes": 30, "upload_files": 2}
-        with patch.dict(os.environ, {"POTETO_TOKEN": "synthetic", "POTETO_TOKEN_FILE": "", "PAAS_TOKEN_FILE": ""}), \
-             patch("sys.argv", ["poteto", "deploy", str(self.root), "--project", "a" * 24, "--local-build", "--no-wait"]), \
-             patch("publisher.cli._credential_file", return_value=None), \
-             patch("publisher.cli.build_local", return_value=(report, b"image")), \
-             patch.object(cli.Client, "request", side_effect=RuntimeError("HTTP 403: image project disabled")) as request, \
-             redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
-            with self.assertRaises(SystemExit) as result:
-                cli.main()
-        self.assertEqual(1, result.exception.code)
-        request.assert_called_once_with("POST", "/v1/projects/" + "a" * 24 + "/preflight",
-                                        {"configuration": config, "archive_bytes": 5, "unpacked_bytes": 30, "files": 2})
+        report = {"configuration": config, "target": "preview", "unpacked_bytes": 30,
+                  "upload_files": 2, "normalized_image_bytes": 170}
+        for flag in [("--local-build",), ("--prebuilt-image", str(self.artifact))]:
+            with self.subTest(flag=flag), patch.dict(os.environ, {"POTETO_TOKEN": "synthetic", "POTETO_TOKEN_FILE": "", "PAAS_TOKEN_FILE": ""}), \
+                 patch("sys.argv", ["poteto", "deploy", str(self.root), "--project", "a" * 24, *flag, "--no-wait"]), \
+                 patch("publisher.cli._credential_file", return_value=None), \
+                 patch("publisher.cli.build_local", return_value=(report, b"image")), \
+                 patch("publisher.cli.read_image", return_value=(report, b"image")), \
+                 patch.object(cli.Client, "request", side_effect=RuntimeError("HTTP 429: Artifact storage quota")) as request, \
+                 redirect_stderr(io.StringIO()) as stderr, redirect_stdout(io.StringIO()):
+                with self.assertRaises(SystemExit) as result:
+                    cli.main()
+                self.assertEqual(1, result.exception.code)
+                self.assertIn("storage quota", stderr.getvalue())
+                request.assert_called_once_with("POST", "/v1/projects/" + "a" * 24 + "/preflight",
+                    {"configuration": config, "archive_bytes": 5, "unpacked_bytes": 30, "files": 2,
+                     "normalized_image_bytes": 170})
 
 
 if __name__ == "__main__":

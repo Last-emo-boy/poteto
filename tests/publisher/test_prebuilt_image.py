@@ -125,6 +125,14 @@ class PrebuiltImageTests(unittest.TestCase):
         self.assertEqual(expected["target"], DeploymentInput(**expected).target)
         self.assertEqual(self.source.read_bytes(), body)
 
+    def test_cli_storage_estimate_covers_normalized_gzip_layers(self):
+        self.source.write_bytes(docker_image(layer=gzip.compress(LAYER)))
+        report, _ = read_image(self.root, self.source, None, self.root / "credential")
+        receipt = prebuilt_image.normalize(self.source, self.output, RELEASE)
+        self.assertLess(report["unpacked_bytes"], len(LAYER))
+        self.assertGreaterEqual(report["normalized_image_bytes"], receipt["image_bytes"])
+        self.assertEqual(len(LAYER) + 4 * 1024**2, report["normalized_image_bytes"])
+
     def test_image_upload_does_not_inherit_small_source_limit(self):
         settings = Settings(self.root, upload_limit=64, unpack_limit=64)
         store = Store(settings)

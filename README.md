@@ -16,7 +16,7 @@ poteto plan . --remote --preview --json
 poteto plan . --prebuilt --remote --preview --json
 ```
 
-Add `--remote` after login to check the selected project's publishing permission, runtime capacity, upload limits, storage budget and database/volume bindings. It sends configuration and byte counts, not application files, and creates no deployment. Use `--project PROJECT_ID` for a manual token. The check is a snapshot: deployment repeats admission checks, and generated files or normalized image storage are checked when available. Without `--remote`, `plan` remains offline and does not read credentials.
+Add `--remote` after login to check the selected project's publishing permission, runtime capacity, upload limits, storage budget and database/volume bindings. It sends configuration and byte counts, not application files, and creates no deployment. Image preflight includes the compressed upload, unpacked archive files, and an estimate of the normalized image. It reports required and remaining bytes and rejects insufficient storage before image upload. New personal accounts have a 1 GiB artifact budget; existing account limits and the single-image limits are unchanged. Use `--project PROJECT_ID` for a manual token. The check is a snapshot: deployment repeats admission checks, and generated files or normalized image storage are checked when available. Without `--remote`, `plan` remains offline and does not read credentials.
 
 ## CLI and Agent Skill
 

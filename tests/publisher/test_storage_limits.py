@@ -31,6 +31,16 @@ class StorageLimitTests(unittest.TestCase):
                 set_storage_limit(store, "one", account["account_id"], 1)
             self.assertEqual(3 * 1024**2, set_storage_limit(store, "one", account["account_id"], 4)["reserved_bytes"])
 
+    def test_new_personal_account_starts_with_one_gib_without_restating_existing_limits(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            store = Store(Settings(Path(temporary), personal_previews=True, new_app_domain="apps.example.test"))
+            existing = store.create_account("existing")
+            with store.connection() as db:
+                project = store.enroll_cli_identity(db, "https://issuer.test", "new-personal")
+                new = db.execute("SELECT a.max_storage FROM accounts a JOIN projects p ON p.account_id=a.id WHERE p.id=?", (project,)).fetchone()
+                old = db.execute("SELECT max_storage FROM accounts WHERE id=?", (existing["account_id"],)).fetchone()
+            self.assertEqual((1024*1024**2,512*1024**2),(new[0],old[0]))
+
     def test_image_and_source_limits_remain_distinct(self):
         settings = Settings(Path("/unused"))
         self.assertEqual((50 * 1024**2, 200 * 1024**2, 10000), settings.upload_limits("static"))

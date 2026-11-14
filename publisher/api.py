@@ -238,7 +238,8 @@ def create_app(settings=None):
     @app.post("/v1/projects/{project_id}/preflight", tags=["Deployments"])
     def preflight(project_id: str, body: PreflightInput, user=Depends(actor)):
         return store.preflight(user, project_id, store.configuration(user, project_id, body.configuration),
-                               body.archive_bytes, body.unpacked_bytes, body.files)
+                               body.archive_bytes, body.unpacked_bytes, body.files,
+                               normalized_image_bytes=body.normalized_image_bytes)
 
     @app.post("/v1/projects/{project_id}/deployments", status_code=201, tags=["Deployments"])
     def create_deployment(project_id: str, body: DeploymentInput, request: Request, user=Depends(actor)):

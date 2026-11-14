@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import zlib
 
 from .archive import ArchiveError, unpack
 from . import image_contract
@@ -32,13 +33,13 @@ def _artifact(root, name="output.tar.gz"):
     return path
 
 
-def _inspect(source, *, image=False):
+def _inspect(source, *, image=False, destination=None):
     upload, expanded, files = ((image_contract.UPLOAD_LIMIT, image_contract.UNPACK_LIMIT, image_contract.FILE_LIMIT)
                                if image else (UPLOAD_LIMIT, UNPACK_LIMIT, FILE_LIMIT))
     if len(source) > upload:
         raise PlanError("artifact_too_large", f"Archive exceeds the server upload limit of {upload // 1024**2} MiB")
     try:
-        return unpack(io.BytesIO(source), None, max_bytes=expanded,
+        return unpack(io.BytesIO(source), destination, max_bytes=expanded,
                       max_files=files, required_file="manifest.json" if image else "index.html")
     except ArchiveError as error:
         raise PlanError("invalid_artifact", str(error)) from None
@@ -215,7 +216,33 @@ def read_image(directory: Path, artifact: Path, config: Path | None, credential_
         raise PlanError("missing_artifact", "Choose a regular Docker image archive from poteto build --from-image.")
     with artifact.open("rb") as source:
         data = source.read(image_contract.UPLOAD_LIMIT + 1)
-    stats = _inspect(data, image=True)
+    with tempfile.TemporaryDirectory(prefix="poteto-image-plan-") as temporary:
+        scratch = Path(temporary)
+        stats = _inspect(data, image=True, destination=scratch)
+        try:
+            _, layers = image_contract.inspect(scratch)
+            expanded = 0
+            unique = {}
+            for layer, digest in layers:
+                with layer.open("rb") as stream:
+                    compressed = stream.read(2) == b"\x1f\x8b"
+                    stream.seek(0)
+                    size = layer.stat().st_size
+                    if compressed:
+                        size = 0
+                        with gzip.GzipFile(fileobj=stream) as content:
+                            while chunk := content.read(1024**2):
+                                size += len(chunk)
+                                if expanded + size > image_contract.UNPACK_LIMIT:
+                                    raise image_contract.ImageError("Unpacked image layers exceed 512 MiB")
+                expanded += size
+                if expanded > image_contract.UNPACK_LIMIT:
+                    raise image_contract.ImageError("Unpacked image layers exceed 512 MiB")
+                unique[digest] = max(size, unique.get(digest, 0))
+        except (ValueError, OSError, EOFError, zlib.error) as error:
+            raise PlanError("invalid_artifact", str(error)) from None
+    # The canonical tar contains each layer once, plus config, manifests and padding.
+    normalized = sum(unique.values()) + image_contract.ARCHIVE_LIMIT - image_contract.UNPACK_LIMIT
     if config is not None and not config.is_file():
         raise PlanError("missing_config", f"Deployment config does not exist: {config}")
     try:
@@ -230,4 +257,5 @@ def read_image(directory: Path, artifact: Path, config: Path | None, credential_
     return {"ok": True, "directory": str(root), "origin": "prebuilt-image", "runtime": "image",
             "target": spec["target"], "build_command": None, "start_command": None, "dockerfile": None,
             "public_directory": None, "artifact": str(artifact.resolve()), "upload_files": stats["files"],
-            "upload_bytes": len(data), "unpacked_bytes": stats["unpacked_bytes"], "configuration": spec}, data
+            "upload_bytes": len(data), "unpacked_bytes": stats["unpacked_bytes"],
+            "normalized_image_bytes": normalized, "configuration": spec}, data

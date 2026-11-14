@@ -659,7 +659,10 @@ class Dokploy:
             if ((prebuilt and status.get('driver') != 'prebuilt') or status.get('image') != 'paas-release:' + deployment['id']
                     or type(size) is not int or not 0 < size <= ARCHIVE_LIMIT):
                 raise BackendError('Invalid prebuilt image receipt')
-            self.store.reserve_built_artifact(deployment['id'], size, image=True)
+            try:
+                self.store.reserve_built_artifact(deployment['id'], size, image=True)
+            except Problem as error:
+                raise BackendError(error.message) from None
         if check:
             check()
         return status

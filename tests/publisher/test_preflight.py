@@ -102,6 +102,35 @@ class PreflightTests(unittest.TestCase):
         self.assertEqual(429,planned.status_code)
         self.assertEqual(planned.json(),deployed.json())
 
+    def test_image_estimate_catches_late_quota_failure_without_side_effects(self):
+        from dataclasses import replace
+        mib = 1024**2
+        settings = replace(self.settings, prebuilt_image_projects=(self.project,))
+        with TestClient(create_app(settings), headers={"Authorization": "Bearer " + self.preview_token}) as client:
+            with self.store.connection() as db:
+                db.execute("UPDATE accounts SET max_storage=? WHERE name='owner'", (512*mib,))
+            body = self.body | {"configuration": {"runtime": "image", "target": "preview"},
+                                "archive_bytes": 75*mib, "unpacked_bytes": 76*mib,
+                                "normalized_image_bytes": 225*mib}
+            first=client.post(self.path,json=body)
+            self.assertEqual(200, first.status_code, first.text)
+            self.assertEqual(376*mib, first.json()["storage"]["required_bytes"])
+            release=client.post(f"/v1/projects/{self.project}/deployments",json=body["configuration"]).json()
+            with self.store.connection() as db:
+                db.execute("UPDATE deployments SET state='ready',built_bytes=? WHERE id=?", (300*mib,release["id"]))
+            before=self.inventory()
+            denied=client.post(self.path,json=body)
+            self.assertEqual(429,denied.status_code,denied.text)
+            for part in ("300.0 MiB used", "512.0 MiB limit", "estimated normalized image 225.0 MiB", "short by 164.0 MiB"):
+                self.assertIn(part,denied.json()["error"])
+            self.assertEqual(before,self.inventory())
+            # Older agents can still send the original preflight shape.
+            legacy=client.post(self.path,json={k:v for k,v in body.items() if k!="normalized_image_bytes"})
+            self.assertEqual(200,legacy.status_code,legacy.text)
+            self.assertIsNone(legacy.json()["storage"]["estimated_normalized_image_bytes"])
+            self.assertEqual(413, client.post(self.path,json=body|{"normalized_image_bytes":517*mib}).status_code)
+            self.assertEqual(422, client.post(self.path,json=self.body|{"normalized_image_bytes":mib}).status_code)
+
     def test_cli_keeps_offline_mode_and_remote_uses_the_same_preview_config(self):
         app = self.root / 'app'; app.mkdir()
         (app / 'index.html').write_text('private-source-text', encoding='utf-8')
