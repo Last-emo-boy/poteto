@@ -1,8 +1,10 @@
 """Normalize one Docker image for the isolated VM or gVisor runtime."""
+from contextlib import contextmanager
 import gzip
 import hashlib
 import io
 import json
+import os
 from pathlib import Path
 import re
 import tarfile
@@ -13,6 +15,39 @@ from publisher.archive import ArchiveError, unpack
 
 from publisher.image_contract import UPLOAD_LIMIT as TRANSPORT_LIMIT, UNPACK_LIMIT as IMAGE_LIMIT, FILE_LIMIT
 from publisher.image_contract import ImageError, METADATA_LIMIT, inspect
+
+WRITEBACK_BATCH = 32 * 1024**2
+
+
+class ImageWriter:
+    """Dirty file pages count toward the build supervisor's memory limit."""
+    def __init__(self, stream):
+        self.stream = stream
+        self.pending = 0
+
+    def tell(self):
+        return self.stream.tell()
+
+    def write(self, data):
+        written = self.stream.write(data)
+        self.pending += written
+        if self.pending >= WRITEBACK_BATCH:
+            self.sync()
+        return written
+
+    def sync(self):
+        if self.pending:
+            self.stream.flush()
+            os.fsync(self.stream.fileno())
+            self.pending = 0
+
+
+@contextmanager
+def image_output(path, mode):
+    with path.open(mode) as stream:
+        out = ImageWriter(stream)
+        yield out
+        out.sync()
 
 
 def add_bytes(archive, name, data):
@@ -85,12 +120,14 @@ def add_layer(archive, name, path, expected, limit, *, scratch):
         digest = hashlib.sha256()
         size = 0
         with (gzip.GzipFile(fileobj=source) if gzip_encoded else source) as layer, tempfile.TemporaryFile(dir=scratch) as staged:
+            writer = ImageWriter(staged)
             while chunk := layer.read(1024**2):
                 size += len(chunk)
                 if size > limit:
                     raise ImageError("Unpacked image layers exceed 512 MiB")
                 digest.update(chunk)
-                staged.write(chunk)
+                writer.write(chunk)
+            writer.sync()
             if "sha256:" + digest.hexdigest() != expected:
                 raise ImageError("Image layer does not match its configuration digest")
             validate_layer(staged, size)
@@ -113,13 +150,13 @@ def normalize(source: Path, destination: Path, release_id: str):
     try:
         with tempfile.TemporaryDirectory(dir=destination.parent) as workspace:
             root = Path(workspace)
-            unpack(source, root, max_bytes=IMAGE_LIMIT, max_files=FILE_LIMIT, private=True)
+            unpack(source, root, max_bytes=IMAGE_LIMIT, max_files=FILE_LIMIT, private=True, open_output=image_output)
             config, layers = inspect(root)
             config_data = config.read_bytes()
             config_digest = "sha256:" + hashlib.sha256(config_data).hexdigest()
             config_name = "blobs/sha256/" + config_digest.split(":")[1]
             names, descriptors, written = [], [], set()
-            with tarfile.open(pending, mode="w") as archive:
+            with image_output(pending, "wb") as output, tarfile.open(fileobj=output, mode="w") as archive:
                 add_bytes(archive, config_name, config_data)
                 for path, digest in layers:
                     name = "blobs/sha256/" + digest.split(":")[1]

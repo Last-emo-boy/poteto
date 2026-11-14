@@ -100,6 +100,22 @@ class PrebuiltImageTests(unittest.TestCase):
             with self.assertRaisesRegex(prebuilt_image.ImageError, "Unpacked image layers"):
                 prebuilt_image.normalize(self.source, self.output, RELEASE)
 
+    def test_writeback_is_bounded_during_archive_output(self):
+        stream = tempfile.TemporaryFile()
+        self.addCleanup(stream.close)
+        writer = prebuilt_image.ImageWriter(stream)
+        with patch.object(prebuilt_image, "WRITEBACK_BATCH", 8), patch.object(prebuilt_image.os, "fsync") as sync:
+            writer.write(b"hello")
+            sync.assert_not_called()
+            writer.write(b" world")
+            sync.assert_called_once_with(stream.fileno())
+            self.assertEqual(11, writer.tell())
+            writer.write(b"!")
+            writer.sync()
+            self.assertEqual(2, sync.call_count)
+        stream.seek(0)
+        self.assertEqual(b"hello world!", stream.read())
+
     def test_executor_normalizes_without_either_builder(self):
         job = self.root / "builds" / RELEASE
         job.mkdir(parents=True)

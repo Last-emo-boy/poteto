@@ -40,7 +40,8 @@ class LimitedGzip:
         return self.stream.seek(offset, whence)
 
 
-def unpack(source, destination: Path | None, *, max_bytes, max_files, private=False, required_file=None):
+def unpack(source, destination: Path | None, *, max_bytes, max_files, private=False, required_file=None,
+           open_output=Path.open):
     count = size = 0
     found_required = required_file is None
     names = set()
@@ -76,7 +77,7 @@ def unpack(source, destination: Path | None, *, max_bytes, max_files, private=Fa
                 if destination:
                     target = destination / normalized
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    with target.open("xb") as out:
+                    with open_output(target, "xb") as out:
                         shutil.copyfileobj(stream, out, 1024 * 1024)
                     target.chmod((0o700 if entry.mode & 0o111 else 0o600) if private else (0o755 if entry.mode & 0o111 else 0o644))
                 else:
